@@ -2,7 +2,7 @@
 
 Newt's personal feelings check-in app, built to replace How We Feel. Live at https://undertow-taupe.vercel.app.
 
-Plain static site with no build step. Vercel serves the repo root and deploys every push to `main`.
+Plain static site with no build step. Vercel (project `undertow`) is linked to this repo: every push to `main` goes live, and other branches get preview links.
 
 ## Files
 - `index.html`: the page shell and tab bar.
