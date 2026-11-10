@@ -21,4 +21,4 @@ Everything stays on the device: localStorage key `undertow.v1`, plus a second co
 - Arabic words are a first draft; check with a speaker before relying on them.
 
 ## Version
-1.0 (Nov 3, 2026). Version and date live at the top of `app.js`.
+1.1 (Nov 10, 2026). Version and date live at the top of `app.js`. Bump `CACHE` in `sw.js` with each release.

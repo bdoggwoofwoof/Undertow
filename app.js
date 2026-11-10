@@ -1,8 +1,8 @@
-/* Undertow 1.0 — personal feelings check-in app. Data stays on this device. */
+/* Undertow 1.1 — personal feelings check-in app. Data stays on this device. */
 (() => {
 'use strict';
-const VERSION = '1.0';
-const VERSION_DATE = 'Nov 3, 2026';
+const VERSION = '1.1';
+const VERSION_DATE = 'Nov 10, 2026';
 const KEY = 'undertow.v1';
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view'), sheet = $('#sheet');
@@ -11,12 +11,14 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const QCOL = { hu: 'var(--hu)', hp: 'var(--hp)', lu: 'var(--lu)', lp: 'var(--lp)' };
 const QORDER = ['hu', 'hp', 'lu', 'lp'];
 const MAX_FEEL = 3;
+const STRENGTH = ['a little', 'somewhat', 'moderately', 'strongly', 'very'];
+const BACKUP_DAYS = 14;
 
 /* ---------- storage: localStorage plus an IndexedDB second copy ---------- */
 const blank = () => ({
   entries: [], toolUses: [], customTools: [], customTags: { people: [], places: [], doing: [] }, hiddenTags: [],
   settings: { theme: 'auto', mode: 'grid', arabic: 'sh', faith: true, reminders: ['09:00', '20:00'] },
-  seenTour: false, savedAt: null,
+  seenTour: false, savedAt: null, lastBackupAt: null, installNoticeAt: null, backupSnoozeAt: null,
 });
 let state = blank();
 let idb = null;
@@ -70,7 +72,11 @@ const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: 'numeric', minut
 const fmtDay = d => new Date(d).toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
 const dayKey = d => { const x = new Date(d); return x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
 const isToday = d => dayKey(d) === dayKey(new Date());
-const domQ = e => (e.feelings.slice().sort((a, b) => b.i - a.i)[0] || {}).q;
+const domQ = e => ((e.feelings || []).slice().sort((a, b) => b.i - a.i)[0] || {}).q;
+const isCheckin = e => !!(e.feelings && e.feelings.length); // tool notes have no feelings
+const daysSince = iso => iso ? (Date.now() - new Date(iso)) / 864e5 : Infinity;
+const isInstalled = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let storagePersisted = false;
 const unpleasant = q => q === 'hu' || q === 'lu';
 function arOf(f) {
   const a = state.settings.arabic;
@@ -163,11 +169,13 @@ function greeting() {
 }
 function entryRow(e) {
   const q = domQ(e);
-  const words = e.feelings.map(f => `${esc(f.w)}${arOf(f) ? `<span class="ar" lang="ar">${esc(arOf(f))}</span>` : ''}`).join(', ');
+  const words = isCheckin(e)
+    ? e.feelings.map(f => `${esc(f.w)}${arOf(f) ? `<span class="ar" lang="ar" dir="rtl">${esc(arOf(f))}</span>` : ''}`).join(', ')
+    : `Note from ${esc(e.toolName || 'a tool')}`;
   const meta = [...(e.body || []).map(b => (BODY.find(x => x[0] === b) || [b, b])[1].toLowerCase()), ...(e.tags || [])].slice(0, 6).join(' · ');
-  return `<button class="entry" data-act="open-entry" data-id="${e.id}">
+  return `<button class="entry" data-act="open-entry" data-id="${esc(e.id)}">
     <span class="bar" style="background:${QCOL[q] || 'var(--edge)'}"></span>
-    <span><span class="when">${fmtTime(e.at)}${e.tool ? ' · tried a tool' : ''}</span>
+    <span><span class="when">${fmtTime(e.at)}${e.tool && isCheckin(e) ? ' · tried a tool' : ''}</span>
     <span class="words" style="display:block">${words}</span>
     ${meta ? `<span class="meta" style="display:block">${esc(meta)}</span>` : ''}
     ${e.note ? `<span class="note">${esc(e.note)}</span>` : ''}</span></button>`;
@@ -176,21 +184,26 @@ function renderToday() {
   const today = state.entries.filter(e => isToday(e.at)).sort((a, b) => b.at.localeCompare(a.at));
   const days = [];
   for (let i = 6; i >= 0; i--) { const d = new Date(); d.setDate(d.getDate() - i); days.push(d); }
+  const weekKeys = new Set(days.map(dayKey));
+  const weekCount = state.entries.filter(e => isCheckin(e) && weekKeys.has(dayKey(e.at))).length;
   const week = days.map(d => {
-    const es = state.entries.filter(e => dayKey(e.at) === dayKey(d));
+    const es = state.entries.filter(e => isCheckin(e) && dayKey(e.at) === dayKey(d));
     const counts = {}; es.forEach(e => { const q = domQ(e); counts[q] = (counts[q] || 0) + 1; });
     const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
     const label = d.toLocaleDateString([], { weekday: 'narrow' });
-    return `<div class="${i0(d) ? 'today' : ''}"><div class="d">${label}</div><div class="dot ${top ? 'on' : ''}" style="${top ? `background:${QCOL[top[0]]}` : ''}" title="${es.length} check-ins">${es.length || ''}</div></div>`;
+    const long = d.toLocaleDateString([], { weekday: 'long' });
+    const say = es.length ? `${long}: ${es.length} check-in${es.length === 1 ? '' : 's'}, mostly ${QUADS[top[0]].short}` : `${long}: no check-ins`;
+    return `<div class="${i0(d) ? 'today' : ''}" role="img" aria-label="${say}"><div class="d" aria-hidden="true">${label}</div><div class="dot ${top ? 'on' : ''}" style="${top ? `background:var(--${top[0]}-soft);border-color:var(--${top[0]})` : ''}" aria-hidden="true">${es.length || ''}</div></div>`;
   }).join('');
   view.innerHTML = `
+  ${notices()}
   <section class="hero" id="t-hero">
     <div class="date">${fmtDay(new Date())}</div>
     <h2>${greeting()}</h2>
     <button class="btn primary checkin-btn" data-act="checkin" id="t-checkin">Check in</button>
   </section>
   <section class="section" id="t-week">
-    <div class="row between"><h2 style="margin:0">This week</h2><span class="muted small">${state.entries.filter(e => (Date.now() - new Date(e.at)) < 7 * 864e5).length} check-ins</span></div>
+    <div class="row between"><h2 style="margin:0">This week</h2><span class="muted small">${weekCount} check-in${weekCount === 1 ? '' : 's'}</span></div>
     <p class="muted small" style="margin-top:4px">Each day takes the color of the feeling you logged most.</p>
     <div class="week">${week}</div>
     <div class="legend" style="margin-top:12px">${QORDER.map(q => `<span><i style="background:${QCOL[q]}"></i>${QUADS[q].short}</span>`).join('')}</div>
@@ -204,44 +217,146 @@ function renderToday() {
   </section>`;
 }
 function i0(d) { return dayKey(d) === dayKey(new Date()); }
+/* Notices that protect the only copy of the data: install, then back up. One at a time. */
+function notices() {
+  const n = state.entries.length;
+  if (!isInstalled() && !storagePersisted && n >= 1 && daysSince(state.installNoticeAt) > 14) {
+    return `<section class="notice" aria-labelledby="nt-install"><h2 id="nt-install">Keep your check-ins safe</h2>
+      <p>Your browser can clear saved data from websites you haven't opened in a while. Add Undertow to your Home Screen (in Safari: Share, then Add to Home Screen) and it keeps your check-ins.</p>
+      <div class="row"><button class="btn" data-act="notice-later" data-k="installNoticeAt">Not now</button></div></section>`;
+  }
+  if (n >= 5 && daysSince(state.lastBackupAt) > BACKUP_DAYS && daysSince(state.backupSnoozeAt) > 3) {
+    const when = state.lastBackupAt ? `Your last backup was ${Math.floor(daysSince(state.lastBackupAt))} days ago.` : 'You haven\'t saved a backup yet.';
+    return `<section class="notice" aria-labelledby="nt-backup"><h2 id="nt-backup">Back up your check-ins</h2>
+      <p>${when} Your ${n} check-ins live only on this phone.</p>
+      <div class="row"><button class="btn primary" data-act="backup">Save a backup</button><button class="btn" data-act="notice-later" data-k="backupSnoozeAt">Later</button></div></section>`;
+  }
+  return '';
+}
 
 /* ---------- Check-in ---------- */
 let ck = null;
+const ckFields = c => JSON.stringify([c.feelings.map(f => [f.w, f.i]), c.body, c.tags, c.note.trim(), c.sleep, c.moved, c.when]);
 function startCheckin() {
   ck = { step: 0, mode: state.settings.mode, quad: null, petal: null, feelings: [], body: [], tags: [], note: '', sleep: null, moved: null, when: null };
+  ck.orig = ckFields(ck);
   drawCheckin();
 }
-function closeSheet() { sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = ''; ck = null; runner = null; stopBreath(); render(); }
-function openSheet(html) { sheet.innerHTML = html; sheet.hidden = false; document.body.style.overflow = 'hidden'; sheet.scrollTop = 0; }
-const STEPS = ['Feel', 'Body', 'Context'];
+/* Edit an existing check-in in the same editor, prefilled. */
+function editCheckin(id) {
+  const e = state.entries.find(x => x.id === id); if (!e || !isCheckin(e)) return;
+  const local = new Date(e.at); local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
+  ck = { editId: id, step: 0, mode: e.feelings.every(f => f.src === 'wheel') ? 'wheel' : 'grid', quad: null, petal: null,
+    feelings: e.feelings.map(f => ({ ...f })), body: [...(e.body || [])], tags: [...(e.tags || [])], note: e.note || '',
+    sleep: e.sleep || null, moved: e.moved || null, when: local.toISOString().slice(0, 16) };
+  ck.orig = ckFields(ck);
+  drawCheckin();
+}
+
+/* ---------- sheets are modal dialogs: focus moves in, the page behind is inert, focus returns on close ---------- */
+let lastFocus = null, lastFocusSel = null;
+/* A selector that finds the same control after the page behind is redrawn. */
+function pageKey(el) {
+  if (!el || el === document.body) return null;
+  if (el.id) return '#' + CSS.escape(el.id);
+  const d = el.dataset || {};
+  if (d.tab) return `[data-tab="${CSS.escape(d.tab)}"]`;
+  if (d.act) return `[data-act="${CSS.escape(d.act)}"]` + (d.id ? `[data-id="${CSS.escape(d.id)}"]` : '');
+  return null;
+}
+function focusKey(el) {
+  if (!el || !sheet.contains(el) || el === sheet) return null;
+  if (el.id) return '#' + CSS.escape(el.id);
+  const a = el.dataset && el.dataset.act; if (!a) return null;
+  let sel = `[data-act="${CSS.escape(a)}"]`;
+  for (const k of ['q', 'rc', 'p', 'l', 'b', 't', 'k', 'v', 'i', 'm', 'f', 'g', 'id', 'json', 'step']) {
+    if (el.dataset[k] !== undefined) sel += `[data-${k}="${CSS.escape(el.dataset[k])}"]`;
+  }
+  return sel;
+}
+function openSheet(html, keep) {
+  const fresh = sheet.hidden;
+  const key = !fresh && keep ? focusKey(document.activeElement) : null;
+  if (fresh) { lastFocus = document.activeElement; lastFocusSel = pageKey(lastFocus); }
+  sheet.innerHTML = html;
+  const h = sheet.querySelector('h2');
+  if (h) { h.id = 'sheet-title'; h.tabIndex = -1; }
+  sheet.hidden = false; document.body.style.overflow = 'hidden';
+  $('#app').inert = true;
+  if (!keep) sheet.scrollTop = 0;
+  let target = key && sheet.querySelector(key);
+  if (!target || target.disabled) target = h || sheet.querySelector('button, [href], input, textarea, select');
+  if (target) target.focus({ preventScroll: !!keep });
+}
+function closeSheet() {
+  sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = '';
+  $('#app').inert = false;
+  ck = null; runner = null; stopBreath(); render();
+  let back = lastFocus && document.body.contains(lastFocus) ? lastFocus : (lastFocusSel && $(lastFocusSel));
+  if (!back) { back = $('#title'); back.tabIndex = -1; }
+  back.focus({ preventScroll: true });
+  lastFocus = null; lastFocusSel = null;
+}
+/* Ask before throwing away work. Returns true when there is something to lose. */
+function unsavedWork() {
+  if (ck) return ckFields(ck) !== ck.orig;
+  if (runner) return !!(runner.journal && runner.journal.trim());
+  return false;
+}
+function requestClose() {
+  if (sheet.hidden) return;
+  if ($('#guard')) return;
+  if (!unsavedWork()) return closeSheet();
+  const what = ck ? (ck.editId ? 'your changes to this check-in' : 'this check-in') : 'what you wrote';
+  const g = document.createElement('div');
+  g.id = 'guard'; g.className = 'guard';
+  g.setAttribute('role', 'alertdialog'); g.setAttribute('aria-modal', 'true');
+  g.setAttribute('aria-labelledby', 'guard-t'); g.setAttribute('aria-describedby', 'guard-d');
+  g.innerHTML = `<div class="guard-box"><h3 id="guard-t">Discard ${what}?</h3><p id="guard-d" class="muted small">It hasn't been saved.</p>
+    <div class="row"><button class="btn primary" data-act="guard-keep">Keep editing</button><button class="btn danger" data-act="guard-discard">Discard</button></div></div>`;
+  [...sheet.children].forEach(c => { c.inert = true; });
+  sheet.appendChild(g);
+  g.querySelector('[data-act="guard-keep"]').focus();
+}
+function closeGuard() {
+  const g = $('#guard'); if (!g) return;
+  g.remove(); [...sheet.children].forEach(c => { c.inert = false; });
+  const h = sheet.querySelector('h2'); if (h) h.focus({ preventScroll: true });
+}
+
+const STEPS = ['Feelings', 'Body', 'Details'];
 function drawCheckin(keepScroll) {
   const y = sheet.scrollTop;
   const s = ck.step;
   const body = s === 0 ? stepFeel() : s === 1 ? stepBody() : stepContext();
   const canNext = s !== 0 || ck.feelings.length > 0;
+  const top = ck.editId
+    ? `<button class="btn quiet" data-act="close">Cancel</button>
+       <div class="seg" role="group" aria-label="Part of the check-in">${STEPS.map((l, i) => `<button data-act="ck-step" data-step="${i}" aria-pressed="${i === s}">${l}</button>`).join('')}</div><span></span>`
+    : `<button class="btn quiet" data-act="${s ? 'ck-back' : 'close'}">${s ? 'Back' : 'Cancel'}</button>
+      <div class="progress" aria-hidden="true">${STEPS.map((_, i) => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div>
+      <span class="step">Step ${s + 1} of 3</span>`;
+  const foot = ck.editId
+    ? `<button class="btn primary" data-act="ck-save" ${ck.feelings.length ? '' : 'disabled'}>${ck.feelings.length ? 'Save changes' : 'Pick a feeling'}</button>`
+    : `${s === 1 ? `<button class="btn" data-act="ck-next">Skip</button>` : ''}
+    <button class="btn primary" data-act="${s === 2 ? 'ck-save' : 'ck-next'}" ${canNext ? '' : 'disabled'}>${s === 2 ? 'Save check-in' : s === 0 && !ck.feelings.length ? 'Pick a feeling' : 'Next'}</button>`;
   openSheet(`<div class="sheet-in">
-    <div class="sheet-top"><button class="btn quiet" data-act="${s ? 'ck-back' : 'close'}">${s ? 'Back' : 'Cancel'}</button>
-      <div class="progress" aria-label="Step ${s + 1} of 3">${STEPS.map((_, i) => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div>
-      <span class="step">${s + 1} of 3</span></div>
+    <div class="sheet-top ${ck.editId ? 'edit' : ''}">${top}</div>
     ${body}
   </div>
-  <div class="sheet-foot"><div class="in">
-    ${s === 1 ? `<button class="btn" data-act="ck-next">Skip</button>` : ''}
-    <button class="btn primary" data-act="${s === 2 ? 'ck-save' : 'ck-next'}" ${canNext ? '' : 'disabled'}>${s === 2 ? 'Save check-in' : s === 0 && !ck.feelings.length ? 'Pick a feeling' : 'Next'}</button>
-  </div></div>`);
+  <div class="sheet-foot"><div class="in">${foot}</div></div>`, keepScroll);
   if (keepScroll) sheet.scrollTop = y;
 }
 function pickedList() {
   if (!ck.feelings.length) return '';
-  const lbl = ['a little', '', 'moderately', '', 'very'];
   return `<div class="picked" id="ck-picked">${ck.feelings.map((f, i) => `
-    <div class="p"><div class="row between"><div><span class="name">${esc(f.w)}${arOf(f) ? `<span class="ar" lang="ar">${esc(arOf(f))}</span>` : ''}</span>
+    <div class="p"><div class="row between"><div><span class="name">${esc(f.w)}${arOf(f) ? `<span class="ar" lang="ar" dir="rtl">${esc(arOf(f))}</span>` : ''}</span>
       ${arOf(f) && f.tr ? `<div class="tr">${esc(f.src === 'wheel' || state.settings.arabic === 'fu' ? f.tr : f.tr)}</div>` : ''}</div>
       <div class="row">${arOf(f) ? `<button class="say" data-act="say" data-i="${i}" aria-label="Hear it in Arabic">▸</button>` : ''}
       <button class="btn quiet" data-act="ck-unpick" data-i="${i}" aria-label="Remove ${esc(f.w)}">Remove</button></div></div>
       <label class="sr" for="int${i}">How strong is ${esc(f.w)}?</label>
-      <input class="range" id="int${i}" type="range" min="1" max="5" value="${f.i}" data-act-input="ck-int" data-i="${i}">
-      <div class="range-labels"><span>a little</span><span>${lbl[f.i - 1] || ''}</span><span>very</span></div></div>`).join('')}
+      <input class="range" id="int${i}" type="range" min="1" max="5" value="${f.i}" aria-valuetext="${STRENGTH[f.i - 1]}" data-act-input="ck-int" data-i="${i}">
+      <div class="range-labels" aria-hidden="true"><span>a little</span><span class="now">${STRENGTH[f.i - 1]}</span><span>very</span></div></div>`).join('')}
     ${ck.feelings.length < MAX_FEEL ? `<p class="muted xs" style="margin:6px 0 0">Mixed feelings are normal. Add up to ${MAX_FEEL}.</p>` : ''}</div>`;
 }
 function isPicked(w) { return ck.feelings.some(f => f.w === w); }
@@ -261,7 +376,7 @@ function stepFeel() {
         const w = m[r + ',' + c];
         const pct = Math.max(12, 62 - w.d * 9);
         const a = arOf({ ...w, src: 'grid' });
-        cells += `<button class="word${w.w.length > 10 ? ' long' : ''}" data-act="ck-word" data-q="${q}" data-rc="${r},${c}" aria-pressed="${isPicked(w.w)}" style="background:color-mix(in srgb, ${QCOL[q]} ${pct}%, var(--surface))">${esc(w.w)}${a ? `<span class="ar" lang="ar">${esc(a)}</span>` : ''}</button>`;
+        cells += `<button class="word${w.w.length > 10 ? ' long' : ''}" data-act="ck-word" data-q="${q}" data-rc="${r},${c}" aria-pressed="${isPicked(w.w)}" style="background:color-mix(in srgb, ${QCOL[q]} calc(${pct}% * var(--tile-k)), var(--surface))">${esc(w.w)}${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
       }
       inner = `<div class="row between" style="margin-top:12px"><button class="btn quiet" data-act="ck-quad" data-q="">← All four</button><span class="muted small">${QUADS[q].name}</span></div>
       <div class="words">${cells}</div><p class="muted xs">Stronger feelings sit toward the outer corner.</p>`;
@@ -283,7 +398,7 @@ function wheelSvg() {
       const [x0, y0] = pt(r0, a0), [x1, y1] = pt(r1, a0), [x2, y2] = pt(r1, a1), [x3, y3] = pt(r0, a1);
       const w = pet.words[lv][0];
       const op = [0.95, 0.7, 0.42][lv];
-      out += `<path d="M${x0},${y0} L${x1},${y1} A${r1},${r1} 0 0 1 ${x2},${y2} L${x3},${y3} A${r0},${r0} 0 0 0 ${x0},${y0}Z" fill="${PETAL_COL[i]}" fill-opacity="${op}" class="${isPicked(w) ? 'sel' : ''}" data-act="ck-wheel" data-p="${i}" data-l="${lv}" role="button" aria-label="${w}" tabindex="0"></path>`;
+      out += `<path d="M${x0},${y0} L${x1},${y1} A${r1},${r1} 0 0 1 ${x2},${y2} L${x3},${y3} A${r0},${r0} 0 0 0 ${x0},${y0}Z" fill="${PETAL_COL[i]}" fill-opacity="${op}" class="${isPicked(w) ? 'sel' : ''}" data-act="ck-wheel" data-p="${i}" data-l="${lv}" role="button" aria-label="${w}" aria-pressed="${isPicked(w)}" tabindex="0"></path>`;
     }
     const am = (a0 + a1) / 2;
     const [tx, ty] = pt(120, am);
@@ -343,12 +458,21 @@ function stepContext() {
   <input id="ck-when" type="datetime-local" value="${now.toISOString().slice(0, 16)}" data-act-input="ck-when" max="${new Date(Date.now() - new Date().getTimezoneOffset() * 6e4).toISOString().slice(0, 16)}">`;
 }
 function saveCheckin() {
-  const e = {
-    id: uid(), at: ck.when ? new Date(ck.when).toISOString() : new Date().toISOString(),
+  if (!ck.feelings.length) return;
+  const fields = {
+    at: ck.when ? new Date(ck.when).toISOString() : new Date().toISOString(),
     feelings: ck.feelings.map(f => ({ w: f.w, src: f.src || 'grid', q: f.q, i: f.i, p: f.p, e: f.e, sh: f.sh, fu: f.fu, tr: f.tr })),
     body: ck.body, tags: ck.tags, note: ck.note.trim(), sleep: ck.sleep, moved: ck.moved,
   };
+  if (ck.editId) {
+    const e = state.entries.find(x => x.id === ck.editId);
+    if (e) Object.assign(e, fields); // keeps id and any tool already tried
+    save(); closeSheet(); toast('Check-in updated.');
+    return;
+  }
+  const e = { id: uid(), ...fields };
   state.entries.push(e); save();
+  ck = null;
   afterSave(e);
 }
 function afterSave(e) {
@@ -374,7 +498,7 @@ const crisisLine = () => `<p class="crisis">If you're in crisis or thinking abou
 /* ---------- Tools ---------- */
 function toolRow(t, entryId) {
   const s = toolStats(t.id);
-  return `<button class="tool" data-act="run-tool" data-id="${t.id}" ${entryId ? `data-entry="${entryId}"` : ''}>
+  return `<button class="tool" data-act="run-tool" data-id="${esc(t.id)}" ${entryId ? `data-entry="${esc(entryId)}"` : ''}>
     <span><span class="n">${esc(t.name)}</span><span class="qdots" aria-hidden="true">${t.q.map(q => `<i style="background:${QCOL[q]}"></i>`).join('')}</span>
     <span class="k" style="display:block">${esc(t.kind || 'Your tool')} · about ${t.min || 3} min</span></span>
     <span class="h">${s.n ? `helped ${s.helped} of ${s.n}` : ''}</span></button>`;
@@ -428,16 +552,23 @@ function breath() {
 }
 function saveTool() {
   const { t, entryId, result, journal } = runner;
-  state.toolUses.push({ id: t.id, at: new Date().toISOString(), entryId: entryId || null, result });
-  if (entryId) {
-    const e = state.entries.find(x => x.id === entryId);
-    if (e) { e.tool = { id: t.id, result }; if (journal.trim()) e.note = (e.note ? e.note + '\n\n' : '') + `${t.name}: ${journal.trim()}`; }
-  } else if (journal.trim()) {
-    toast('Note kept with the tool. Check in to save it to the journal.');
+  const note = (journal || '').trim();
+  const at = new Date().toISOString();
+  let savedNote = false;
+  const e = entryId && state.entries.find(x => x.id === entryId);
+  if (e) {
+    e.tool = { id: t.id, result };
+    if (note) { e.note = (e.note ? e.note + '\n\n' : '') + `${t.name}: ${note}`; savedNote = true; }
+  } else if (note) {
+    // Opened from the Tools tab: keep the writing as its own journal entry.
+    state.entries.push({ id: uid(), at, feelings: [], body: [], tags: [], note, toolOnly: true, toolName: t.name, tool: { id: t.id, result } });
+    savedNote = true;
   }
+  state.toolUses.push({ id: t.id, at, entryId: e ? e.id : null, result });
   save(); stopBreath(); runner = null;
-  sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = '';
-  render(); toast(result > 0 ? 'Glad it helped. Saved.' : 'Saved. Good to know what doesn\'t help, too.');
+  closeSheet();
+  const how = result > 0 ? 'Glad it helped.' : 'Good to know what doesn\'t help, too.';
+  toast(savedNote ? `${how} Your note is in the Journal.` : `${how} Saved.`);
 }
 function addToolSheet() {
   runner = null;
@@ -468,22 +599,35 @@ function openEntry(id) {
   const tool = e.tool && [...TOOLS, ...state.customTools].find(t => t.id === e.tool.id);
   const resL = { '-1': 'worse', '0': 'about the same', '1': 'a bit better', '2': 'better' };
   const sl = { short: 'Short sleep', ok: 'OK sleep', good: 'Good sleep' };
-  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">${fmtDay(e.at)}, ${fmtTime(e.at)}</span></div>
-    ${e.feelings.map(f => `<div class="picked" style="border-left:6px solid ${QCOL[f.q]}"><span class="name" style="font-weight:600">${esc(f.w)}${arOf(f) ? ` <span class="ar muted" lang="ar">${esc(arOf(f))}</span>` : ''}</span><div class="muted small">${['a little', 'a little', 'moderately', 'strongly', 'very'][f.i - 1]} · ${QUADS[f.q].short.toLowerCase()}${f.src === 'wheel' ? ' · from the wheel' : ''}</div></div>`).join('')}
+  const eid = esc(e.id);
+  const when = `${fmtDay(e.at)}, ${fmtTime(e.at)}`;
+  if (!isCheckin(e)) {
+    // A note written in a tool: only the note can change.
+    openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">${when}</span></div>
+      <h2>Note from ${esc(e.toolName || (tool && tool.name) || 'a tool')}</h2>
+      ${tool ? `<p class="muted">Felt ${resL[e.tool.result] || ''} after.</p>` : ''}
+      <label class="lbl" for="en-note">Note</label><textarea id="en-note" data-id="${eid}">${esc(e.note)}</textarea>
+      <div class="row" style="margin-top:12px"><button class="btn primary" data-act="en-save" data-id="${eid}">Save note</button></div>
+      <div style="margin-top:28px"><button class="btn danger" data-act="en-del" data-id="${eid}">Delete note</button></div></div>`);
+    return;
+  }
+  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><button class="btn primary" data-act="en-edit" data-id="${eid}">Edit</button></div>
+    <h2>${when}</h2>
+    <ul class="feel-list">${e.feelings.map(f => `<li><i class="qdot" style="background:${QCOL[f.q]}" aria-hidden="true"></i><span><span class="name">${esc(f.w)}${arOf(f) ? ` <span class="ar muted" lang="ar" dir="rtl">${esc(arOf(f))}</span>` : ''}</span><span class="muted small" style="display:block">${STRENGTH[f.i - 1]} · ${QUADS[f.q].short.toLowerCase()}${f.src === 'wheel' ? ' · from the wheel' : ''}</span></span></li>`).join('')}</ul>
     ${e.body.length ? `<p><b>Body:</b> ${e.body.map(b => (BODY.find(x => x[0] === b) || [b, b])[1].toLowerCase()).join(', ')}</p>` : ''}
     ${e.tags.length ? `<p><b>Tags:</b> ${e.tags.map(esc).join(', ')}</p>` : ''}
     ${e.sleep || e.moved ? `<p class="muted">${[sl[e.sleep], e.moved === 'yes' ? 'Moved today' : e.moved === 'no' ? 'Hadn\'t moved yet' : ''].filter(Boolean).join(' · ')}</p>` : ''}
     ${tool ? `<p class="muted">Tried ${esc(tool.name)}: felt ${resL[e.tool.result] || ''} after.</p>` : ''}
-    <label class="lbl" for="en-note">Note</label><textarea id="en-note" data-id="${e.id}">${esc(e.note)}</textarea>
-    <div class="row" style="margin-top:12px"><button class="btn" data-act="en-save" data-id="${e.id}">Save note</button><button class="btn" data-act="run-tool-pick" data-id="${e.id}">Try a tool</button></div>
-    <div style="margin-top:28px"><button class="btn danger" data-act="en-del" data-id="${e.id}">Delete check-in</button></div></div>`);
+    <h3>Note</h3>${e.note ? `<p class="entry-note">${esc(e.note)}</p>` : `<p class="muted">No note. Tap Edit to add one.</p>`}
+    <div class="row" style="margin-top:12px"><button class="btn" data-act="run-tool-pick" data-id="${eid}">Try a tool</button></div>
+    <div style="margin-top:28px"><button class="btn danger" data-act="en-del" data-id="${eid}">Delete check-in</button></div></div>`);
 }
 
 /* ---------- Patterns ---------- */
 let pRange = 30;
 function renderPatterns() {
   const since = pRange ? Date.now() - pRange * 864e5 : 0;
-  const es = state.entries.filter(e => new Date(e.at) >= since);
+  const es = state.entries.filter(e => isCheckin(e) && new Date(e.at) >= since);
   const rangeSeg = `<div class="seg" role="group" aria-label="Range">${[[7, '7 days'], [30, '30 days'], [0, 'All']].map(([v, l]) => `<button data-act="p-range" data-v="${v}" aria-pressed="${pRange === v}">${l}</button>`).join('')}</div>`;
   if (es.length < 5) {
     view.innerHTML = `${rangeSeg}<div class="empty" style="margin-top:16px">Patterns show up after about 5 check-ins in this range. You have ${es.length}.<br><br>Tags, sleep and movement make them sharper.</div>`;
@@ -546,22 +690,23 @@ function renderPatterns() {
 /* ---------- More ---------- */
 function renderMore() {
   const s = state.settings;
-  const sel = (k, opts) => `<select data-act-input="set" data-k="${k}">${opts.map(([v, l]) => `<option value="${v}" ${String(s[k]) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  const sel = (k, opts, desc) => `<select id="set-${k}" ${desc ? `aria-describedby="set-${k}-d"` : ''} data-act-input="set" data-k="${k}">${opts.map(([v, l]) => `<option value="${v}" ${String(s[k]) === String(v) ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+  const row = (k, title, desc, opts) => `<div class="set"><div><label class="t" for="set-${k}">${title}</label>${desc ? `<div class="d" id="set-${k}-d">${desc}</div>` : ''}</div>${sel(k, opts, desc)}</div>`;
   view.innerHTML = `
   <h2>Settings</h2>
-  <div class="set"><div><div class="t">Appearance</div></div>${sel('theme', [['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']])}</div>
-  <div class="set"><div><div class="t">Check-in starts with</div><div class="d">You can switch during any check-in</div></div>${sel('mode', [['grid', 'Grid'], ['wheel', 'Wheel']])}</div>
-  <div class="set"><div><div class="t">Arabic words</div><div class="d">Shown under each feeling, with a button to hear them</div></div>${sel('arabic', [['sh', 'Shami'], ['fu', 'Fusha'], ['both', 'Both'], ['off', 'Off']])}</div>
-  <div class="set"><div><div class="t">Faith tools</div><div class="d">Prayer and scripture in Tools</div></div>${sel('faith', [[true, 'Show'], [false, 'Hide']].map(([v, l]) => [String(v), l]))}</div>
+  ${row('theme', 'Appearance', '', [['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']])}
+  ${row('mode', 'Check-in starts with', 'You can switch during any check-in', [['grid', 'Grid'], ['wheel', 'Wheel']])}
+  ${row('arabic', 'Arabic words', 'Shown under each feeling, with a button to hear them', [['sh', 'Shami'], ['fu', 'Fusha'], ['both', 'Both'], ['off', 'Off']])}
+  ${row('faith', 'Faith tools', 'Prayer and scripture in Tools', [[true, 'Show'], [false, 'Hide']].map(([v, l]) => [String(v), l]))}
   <h2>Tags</h2><p class="muted small">Tap a tag to hide it. Add new ones during a check-in.</p>
   ${Object.keys(TAG_GROUPS).map(g => `<div class="chips" style="margin-bottom:10px">${[...TAG_GROUPS[g], ...state.customTags[g]].map(t => `<button class="chip" data-act="tag-hide" data-k="${g}:${esc(t)}" aria-pressed="${!state.hiddenTags.includes(g + ':' + t)}">${esc(t)}</button>`).join('')}</div>`).join('')}
   <h2>Reminders</h2>
   <p class="muted small">Undertow doesn't nag. If you'd like a nudge, add check-in times to your calendar.</p>
-  <div class="row" id="rem">${s.reminders.map((t, i) => `<input type="time" value="${t}" data-act-input="rem" data-i="${i}" style="width:auto">`).join('')}<button class="btn quiet" data-act="rem-add">+ Time</button>${s.reminders.length ? `<button class="btn quiet" data-act="rem-del">− Time</button>` : ''}</div>
+  <div class="row" id="rem">${s.reminders.map((t, i) => `<input type="time" value="${t}" aria-label="Reminder ${i + 1} time" data-act-input="rem" data-i="${i}" style="width:auto">`).join('')}<button class="btn quiet" data-act="rem-add">+ Time</button>${s.reminders.length ? `<button class="btn quiet" data-act="rem-del">− Time</button>` : ''}</div>
   <div style="margin-top:10px"><button class="btn" data-act="ics" ${s.reminders.length ? '' : 'disabled'}>Add to calendar</button></div>
   <h2>Your data</h2>
-  <p class="muted small">Everything stays on this phone. Save a backup now and then; it's the only copy.</p>
-  <button class="linkrow" data-act="backup">Save a backup<span class="d">${state.entries.length} check-ins · last saved ${state.savedAt ? fmtDay(state.savedAt) : 'never'}</span></button>
+  <p class="muted small">Everything stays on this phone. Save a backup now and then; it's the only copy.${isInstalled() ? '' : ' Adding Undertow to your Home Screen also stops the browser from clearing it.'}</p>
+  <button class="linkrow" data-act="backup">Save a backup<span class="d">${state.entries.length} entries · last backup ${state.lastBackupAt ? fmtDay(state.lastBackupAt) : 'never'}</span></button>
   <button class="linkrow" data-act="restore">Restore from a backup<span class="d">Adds check-ins you don't already have</span></button>
   <button class="linkrow" data-act="csv">Export a spreadsheet (CSV)</button>
   <input type="file" id="restore-file" accept=".json,application/json" hidden>
@@ -575,6 +720,27 @@ function download(name, text, type) {
   a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = name; document.body.appendChild(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+/* The share sheet works inside an installed iPhone app, where download links often don't.
+   Returns 'shared', 'downloaded' or 'cancelled'. Must be called straight from a tap. */
+async function shareOrDownload(name, text, type) {
+  try {
+    const file = new File([text], name, { type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: name });
+      return 'shared';
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') return 'cancelled';
+  }
+  download(name, text, type);
+  return 'downloaded';
+}
+async function backup() {
+  const how = await shareOrDownload(`undertow-backup-${dayKey(new Date())}.json`, JSON.stringify(state, null, 1), 'application/json');
+  if (how === 'cancelled') return toast('Backup not saved.');
+  state.lastBackupAt = new Date().toISOString(); save(); render();
+  toast(how === 'shared' ? 'Backup ready. Save it to Files or somewhere safe.' : 'Backup saved to your downloads.');
 }
 function makeIcs() {
   const pad = n => String(n).padStart(2, '0');
@@ -599,6 +765,21 @@ function csv() {
   });
   return rows.map(r => r.map(q).join(',')).join('\r\n');
 }
+/* Accept only well-formed entries from a backup file; anything else is skipped and counted. */
+function cleanEntry(e) {
+  if (!e || typeof e.id !== 'string' || !e.id || isNaN(Date.parse(e.at))) return null;
+  const strs = a => Array.isArray(a) ? a.filter(x => typeof x === 'string') : [];
+  const feelings = (Array.isArray(e.feelings) ? e.feelings : [])
+    .filter(f => f && typeof f.w === 'string' && QUADS[f.q])
+    .map(f => ({ w: f.w, src: f.src === 'wheel' ? 'wheel' : 'grid', q: f.q, i: Math.min(5, Math.max(1, Math.round(+f.i) || 3)),
+      p: +f.p || 0, e: +f.e || 0, sh: typeof f.sh === 'string' ? f.sh : '', fu: typeof f.fu === 'string' ? f.fu : '', tr: typeof f.tr === 'string' ? f.tr : '' }));
+  if (!feelings.length && !e.toolOnly) return null;
+  const out = { id: e.id, at: new Date(e.at).toISOString(), feelings, body: strs(e.body).filter(b => BODY.some(x => x[0] === b)), tags: strs(e.tags),
+    note: typeof e.note === 'string' ? e.note : '', sleep: ['short', 'ok', 'good'].includes(e.sleep) ? e.sleep : null, moved: ['yes', 'no'].includes(e.moved) ? e.moved : null };
+  if (e.tool && typeof e.tool.id === 'string') out.tool = { id: e.tool.id, result: Math.min(2, Math.max(-1, Math.round(+e.tool.result) || 0)) };
+  if (e.toolOnly) { out.toolOnly = true; out.toolName = typeof e.toolName === 'string' ? e.toolName : ''; }
+  return out;
+}
 function restore(file) {
   const r = new FileReader();
   r.onload = () => {
@@ -606,14 +787,24 @@ function restore(file) {
       const d = JSON.parse(r.result);
       if (!d || !Array.isArray(d.entries)) throw new Error('not a backup');
       const have = new Set(state.entries.map(e => e.id));
-      const add = d.entries.filter(e => e && e.id && !have.has(e.id));
+      const clean = d.entries.map(cleanEntry);
+      const skipped = clean.filter(e => !e).length;
+      const add = clean.filter(e => e && !have.has(e.id));
       state.entries.push(...add);
       const uh = new Set(state.toolUses.map(u => u.at + u.id));
-      state.toolUses.push(...(d.toolUses || []).filter(u => !uh.has(u.at + u.id)));
+      state.toolUses.push(...(Array.isArray(d.toolUses) ? d.toolUses : []).filter(u => u && typeof u.id === 'string' && !isNaN(Date.parse(u.at)) && !uh.has(u.at + u.id)));
       const th = new Set(state.customTools.map(t => t.id));
-      state.customTools.push(...(d.customTools || []).filter(t => !th.has(t.id)));
-      for (const g of Object.keys(TAG_GROUPS)) state.customTags[g] = [...new Set([...state.customTags[g], ...((d.customTags || {})[g] || [])])];
-      readOk = true; save(); render(); toast(`Restored ${add.length} check-in${add.length === 1 ? '' : 's'}.`);
+      state.customTools.push(...(Array.isArray(d.customTools) ? d.customTools : []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && Array.isArray(t.steps) && Array.isArray(t.q) && !th.has(t.id)));
+      for (const g of Object.keys(TAG_GROUPS)) state.customTags[g] = [...new Set([...state.customTags[g], ...(((d.customTags || {})[g]) || []).filter(t => typeof t === 'string')])];
+      readOk = true; save(); render();
+      const msg = `Restored ${add.length} entr${add.length === 1 ? 'y' : 'ies'}${skipped ? `, skipped ${skipped} that couldn't be read` : ''}.`;
+      if (d.settings && typeof d.settings === 'object') {
+        toast(msg, 'Use its settings', () => {
+          state.settings = { ...state.settings, ...d.settings };
+          if (Array.isArray(d.hiddenTags)) state.hiddenTags = d.hiddenTags.filter(t => typeof t === 'string');
+          save(); applyTheme(); render(); toast('Settings restored.');
+        });
+      } else toast(msg);
     } catch { toast('That file isn\'t an Undertow backup.'); }
   };
   r.readAsText(file);
@@ -630,7 +821,8 @@ function helpSheet() {
   <h3>Patterns</h3>
   <p>After about five check-ins, Patterns compares your feelings across times of day, weekdays, tags, sleep and movement, and shows which tools have helped. They're patterns in what you logged, not diagnoses.</p>
   <h3>Privacy</h3>
-  <p>Everything stays on this device: no account, no server, no tracking. A second copy is kept in the browser's database in case the first can't be read. Save a backup file in More now and then.</p>
+  <p>Everything stays on this device: no account, no server, no tracking. A second copy is kept in the browser's database in case the first can't be read. Save a backup file in More now and then; Undertow reminds you every two weeks.</p>
+  <p>Add Undertow to your Home Screen (in Safari: Share, then Add to Home Screen). In a normal Safari tab, Safari can clear a site's saved data after 7 days without a visit; an app on the Home Screen keeps it.</p>
   <h3>Limitations</h3>
   <ul><li>No sync between devices yet; move data with a backup file.</li><li>Undertow can't read Snooz or Ironwood yet; use the sleep and movement buttons for now.</li><li>Reminders are calendar events, not app notifications.</li></ul>
   ${crisisLine()}
@@ -650,9 +842,10 @@ const TOUR = [
 ];
 let tourI = 0;
 function startTour() { closeSheetQuiet(); tourI = 0; go('today'); drawTour(); }
-function closeSheetQuiet() { sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = ''; ck = null; runner = null; }
+function closeSheetQuiet() { sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = ''; $('#app').inert = false; ck = null; runner = null; lastFocus = null; }
 function drawTour() {
   const t = TOUR[tourI], el = $('#tour'); el.hidden = false;
+  $('#app').inert = false; // measure the real layout, then lock it
   const target = t.sel && $(t.sel);
   let hole = '', pos = 'top:30%';
   if (target) {
@@ -661,10 +854,16 @@ function drawTour() {
     hole = `<div class="hole" style="left:${r.left - 6}px;top:${r.top - 6}px;width:${r.width + 12}px;height:${r.height + 12}px"></div>`;
     pos = r.top > innerHeight / 2 ? `bottom:${innerHeight - r.top + 18}px` : `top:${r.bottom + 18}px`;
   } else hole = `<div class="hole" style="left:50%;top:50%;width:0;height:0"></div>`;
-  el.innerHTML = `${hole}<div class="tip" style="${pos}" role="dialog" aria-label="Tour">${t.lim ? '<div class="lim">Limitation</div>' : ''}<h3>${t.h}</h3><p>${t.b}</p>
+  el.innerHTML = `${hole}<div class="tip" style="${pos}" role="dialog" aria-modal="true" aria-labelledby="tour-h" aria-describedby="tour-b">${t.lim ? '<div class="lim">Limitation</div>' : ''}<h3 id="tour-h">${t.h}</h3><p id="tour-b">${t.b}</p>
     <div class="row between"><span class="muted xs">${tourI + 1} of ${TOUR.length}</span><div class="row"><button class="btn quiet" data-act="tour-end">Skip</button>${tourI ? '<button class="btn" data-act="tour-prev">Back</button>' : ''}<button class="btn primary" data-act="tour-next">${tourI === TOUR.length - 1 ? 'Done' : 'Next'}</button></div></div></div>`;
+  $('#app').inert = true;
+  el.querySelector('[data-act="tour-next"]').focus({ preventScroll: true });
 }
-function endTour() { $('#tour').hidden = true; $('#tour').innerHTML = ''; state.seenTour = true; save(); }
+function endTour() {
+  $('#tour').hidden = true; $('#tour').innerHTML = ''; $('#app').inert = !sheet.hidden;
+  state.seenTour = true; save();
+  const c = $('#t-checkin'); if (c) c.focus({ preventScroll: true });
+}
 
 /* ---------- events ---------- */
 let delArmed = null;
@@ -675,8 +874,13 @@ document.addEventListener('click', ev => {
   switch (a) {
     case 'tab': return go(d.to);
     case 'checkin': return startCheckin();
-    case 'close': return closeSheet();
+    case 'close': return requestClose();
+    case 'guard-keep': return closeGuard();
+    case 'guard-discard': return closeSheet();
     case 'help': return helpSheet();
+    case 'notice-later': state[d.k] = new Date().toISOString(); save(); return render();
+    case 'ck-step': ck.step = +d.step; return drawCheckin();
+    case 'en-edit': return editCheckin(d.id);
     case 'ck-mode': ck.mode = d.m; return drawCheckin(true);
     case 'ck-quad': ck.quad = d.q || null; return drawCheckin(true);
     case 'ck-word': { const w = GRIDMAP[d.q][d.rc]; addFeeling({ ...w, src: 'grid' }); return drawCheckin(true); }
@@ -697,14 +901,15 @@ document.addEventListener('click', ev => {
     case 'ck-opt': ck[d.k] = ck[d.k] === d.v ? null : d.v; return drawCheckin(true);
     case 'ck-save': return saveCheckin();
     case 'open-entry': return openEntry(d.id);
-    case 'en-save': { const e = state.entries.find(x => x.id === d.id); e.note = $('#en-note').value.trim(); save(); return toast('Note saved.'); }
+    case 'en-save': { const e = state.entries.find(x => x.id === d.id); if (!e) return; e.note = $('#en-note').value.trim(); save(); closeSheet(); return toast('Note saved.'); }
     case 'en-del': {
       if (delArmed !== d.id) { delArmed = d.id; b.textContent = 'Tap again to delete'; setTimeout(() => { delArmed = null; }, 4000); return; }
-      const i = state.entries.findIndex(x => x.id === d.id); const [gone] = state.entries.splice(i, 1); save(); closeSheet();
-      return toast('Check-in deleted.', 'Undo', () => { state.entries.push(gone); save(); render(); });
+      const i = state.entries.findIndex(x => x.id === d.id); if (i < 0) return;
+      const [gone] = state.entries.splice(i, 1); save(); closeSheet();
+      return toast(isCheckin(gone) ? 'Check-in deleted.' : 'Note deleted.', 'Undo', () => { state.entries.push(gone); save(); render(); });
     }
     case 'run-tool-pick': {
-      const e = state.entries.find(x => x.id === d.id); const q = domQ(e);
+      const e = state.entries.find(x => x.id === d.id); if (!e) return; const q = domQ(e);
       openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">Pick a tool</span></div><h2>Try a tool</h2>${suggestTools(q).map(t => toolRow(t, e.id)).join('')}</div>`);
       return;
     }
@@ -731,10 +936,10 @@ document.addEventListener('click', ev => {
     case 'tag-hide': { const k = d.k; state.hiddenTags = state.hiddenTags.includes(k) ? state.hiddenTags.filter(x => x !== k) : [...state.hiddenTags, k]; save(); return render(); }
     case 'rem-add': state.settings.reminders.push('13:00'); save(); return render();
     case 'rem-del': state.settings.reminders.pop(); save(); return render();
-    case 'ics': download('undertow-checkins.ics', makeIcs(), 'text/calendar'); return toast('Open the file to add the reminders to your calendar.');
-    case 'backup': download(`undertow-backup-${dayKey(new Date())}.json`, JSON.stringify(state, null, 1), 'application/json'); return toast('Backup saved.');
+    case 'ics': shareOrDownload('undertow-checkins.ics', makeIcs(), 'text/calendar').then(h => { if (h !== 'cancelled') toast('Open the file to add the reminders to your calendar.'); }); return;
+    case 'backup': backup(); return;
     case 'restore': return $('#restore-file').click();
-    case 'csv': return download(`undertow-${dayKey(new Date())}.csv`, csv(), 'text/csv');
+    case 'csv': shareOrDownload(`undertow-${dayKey(new Date())}.csv`, csv(), 'text/csv'); return;
     case 'tour': return startTour();
     case 'tour-next': if (tourI === TOUR.length - 1) return endTour(); tourI++; return drawTour();
     case 'tour-prev': tourI--; return drawTour();
@@ -743,11 +948,25 @@ document.addEventListener('click', ev => {
 });
 document.addEventListener('keydown', ev => {
   if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('svg [data-act]')) { ev.preventDefault(); ev.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
-  if (ev.key === 'Escape') { if (!$('#tour').hidden) endTour(); else if (!sheet.hidden) closeSheet(); }
+  if (ev.key === 'Escape') {
+    if (!$('#tour').hidden) endTour();
+    else if ($('#guard')) closeGuard();
+    else if (!sheet.hidden) requestClose();
+  }
+  // Keep Tab inside an open dialog (the page behind is inert; this also wraps the ends).
+  if (ev.key === 'Tab') {
+    const box = $('#guard') || (!$('#tour').hidden && $('#tour .tip')) || (!sheet.hidden && sheet);
+    if (!box) return;
+    const items = [...box.querySelectorAll('button:not([disabled]), [href], input, textarea, select, [tabindex="0"]')].filter(x => !x.closest('[inert]') && x.getClientRects().length > 0);
+    if (!items.length) return;
+    const first = items[0], last = items[items.length - 1];
+    if (ev.shiftKey && (document.activeElement === first || !box.contains(document.activeElement))) { ev.preventDefault(); last.focus(); }
+    else if (!ev.shiftKey && (document.activeElement === last || !box.contains(document.activeElement))) { ev.preventDefault(); first.focus(); }
+  }
 });
 document.addEventListener('input', ev => {
   const el = ev.target, a = el.dataset.actInput; if (!a) return;
-  if (a === 'ck-int') { ck.feelings[+el.dataset.i].i = +el.value; const lab = el.nextElementSibling.children[1]; lab.textContent = ['a little', '', 'moderately', '', 'very'][el.value - 1]; }
+  if (a === 'ck-int') { ck.feelings[+el.dataset.i].i = +el.value; const word = STRENGTH[el.value - 1]; el.setAttribute('aria-valuetext', word); el.nextElementSibling.querySelector('.now').textContent = word; }
   if (a === 'ck-note') ck.note = el.value;
   if (a === 'ck-when') ck.when = el.value || null;
   if (a === 'tool-journal') runner.journal = el.value;
@@ -759,7 +978,7 @@ document.addEventListener('change', ev => {
   if (el.id === 'restore-file' && el.files[0]) { restore(el.files[0]); el.value = ''; }
   if (el.dataset.actInput === 'set') {
     const k = el.dataset.k; let v = el.value; if (k === 'faith') v = v === 'true';
-    state.settings[k] = v; save(); if (k === 'theme') applyTheme(); toast('Saved.');
+    state.settings[k] = v; save(); if (k === 'theme') applyTheme();
   }
 });
 addEventListener('resize', () => { if (!$('#tour').hidden) drawTour(); });
@@ -768,6 +987,12 @@ addEventListener('resize', () => { if (!$('#tour').hidden) drawTour(); });
 (async () => {
   await load();
   applyTheme();
+  // Ask the browser to keep this app's storage. Installed apps and engaged sites usually get it.
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      storagePersisted = await navigator.storage.persisted() || await navigator.storage.persist();
+    }
+  } catch {}
   go('today');
   if (pendingToast) toast(pendingToast);
   if (!state.seenTour) setTimeout(startTour, 400);
