@@ -1,8 +1,8 @@
-/* Undertow 1.1 — personal feelings check-in app. Data stays on this device. */
+/* Undertow 1.2 — personal feelings check-in app. Data stays on this device. */
 (() => {
 'use strict';
-const VERSION = '1.1';
-const VERSION_DATE = 'Nov 10, 2026';
+const VERSION = '1.2';
+const VERSION_DATE = 'Nov 15, 2026';
 const KEY = 'undertow.v1';
 const $ = (s, el = document) => el.querySelector(s);
 const view = $('#view'), sheet = $('#sheet');
@@ -16,8 +16,8 @@ const BACKUP_DAYS = 14;
 
 /* ---------- storage: localStorage plus an IndexedDB second copy ---------- */
 const blank = () => ({
-  entries: [], toolUses: [], customTools: [], customTags: { people: [], places: [], doing: [] }, hiddenTags: [],
-  settings: { theme: 'auto', mode: 'grid', arabic: 'sh', faith: true, reminders: ['09:00', '20:00'] },
+  schema: 2, entries: [], toolUses: [], kit: [], hiddenBuiltIns: [], customTools: [], customTags: { people: [], places: [], doing: [] }, hiddenTags: [],
+  settings: { theme: 'auto', mode: 'field', arabic: 'off', faith: true, reminders: ['09:00', '20:00'] },
   seenTour: false, savedAt: null, lastBackupAt: null, installNoticeAt: null, backupSnoozeAt: null,
 });
 let state = blank();
@@ -39,7 +39,23 @@ function idbGet() {
     catch { res(null); }
   });
 }
+/* 1.1 tools you added become Toolkit skills (same ids, so "helped X of Y" carries over). */
+const customToKit = t => ({ id: t.id, type: 'skill', title: t.name, body: '', steps: t.steps, q: t.q, needs: [], tags: [], min: t.min || 5, anywhere: true, source: '', fav: false, at: new Date().toISOString() });
+const validCustom = t => t && typeof t.id === 'string' && typeof t.name === 'string' && Array.isArray(t.steps) && Array.isArray(t.q);
+/* Saved data from 1.1 or earlier: Arabic now starts hidden, the grid became the field, tools became the Toolkit. */
+function migrate(s) {
+  if ((s.schema || 1) >= 2) return s;
+  s.settings = s.settings || {};
+  if (s.settings.arabic && s.settings.arabic !== 'off') s.settings.arabicWas = s.settings.arabic;
+  s.settings.arabic = 'off';
+  if (s.settings.mode !== 'wheel') s.settings.mode = 'field';
+  s.kit = [...(Array.isArray(s.kit) ? s.kit : []), ...(Array.isArray(s.customTools) ? s.customTools : []).filter(validCustom).map(customToKit)];
+  s.customTools = [];
+  s.schema = 2;
+  return s;
+}
 function merge(s) {
+  s = migrate(s);
   const b = blank();
   return { ...b, ...s, settings: { ...b.settings, ...(s.settings || {}) }, customTags: { ...b.customTags, ...(s.customTags || {}) } };
 }
@@ -100,14 +116,6 @@ function applyTheme() {
 function tagsFor(group) {
   return [...TAG_GROUPS[group], ...state.customTags[group]].filter(t => !state.hiddenTags.includes(group + ':' + t));
 }
-function allTools() {
-  return [...TOOLS, ...state.customTools].filter(t => state.settings.faith || !t.optional);
-}
-function toolStats(id) {
-  const u = state.toolUses.filter(x => x.id === id && x.result != null);
-  const helped = u.filter(x => x.result > 0).length;
-  return { n: u.length, helped, avg: u.length ? u.reduce((s, x) => s + x.result, 0) / u.length : 0 };
-}
 function say(text) {
   try {
     const u = new SpeechSynthesisUtterance(text); u.lang = 'ar';
@@ -116,24 +124,18 @@ function say(text) {
   } catch { toast('This browser has no Arabic voice.'); }
 }
 
-/* ---------- grid geometry ---------- */
-const CORNER = { hu: [0, 0], hp: [0, 3], lu: [3, 0], lp: [3, 3] };
-function gridCells(q) {
-  const [cr, cc] = CORNER[q];
-  const cells = [];
-  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) cells.push({ r, c, d: Math.abs(r - cr) + Math.abs(c - cc) });
-  const order = cells.slice().sort((a, b) => a.d - b.d || Math.abs(a.r - cr) - Math.abs(b.r - cr));
-  order.forEach((cell, k) => { cell.k = k; });
-  const map = {};
-  order.forEach(cell => {
-    const w = GRID[q][cell.k];
-    const xd = (q === 'hu' || q === 'lu') ? 4 - cell.c : cell.c + 1;
-    const yd = (q === 'hu' || q === 'hp') ? 4 - cell.r : cell.r + 1;
-    map[cell.r + ',' + cell.c] = { w: w[0], sh: w[1], fu: w[2], tr: w[3], q, d: cell.d, p: QUADS[q].p * xd / 2, e: QUADS[q].e * yd / 2 };
-  });
-  return map;
-}
-const GRIDMAP = Object.fromEntries(QORDER.map(q => [q, gridCells(q)]));
+/* ---------- the feeling field ---------- */
+/* Each word's place: quadrant, distance from the middle (0 mildest .. 10 strongest), and
+   pleasantness and energy on a -2..2 scale for Patterns. */
+const FMAP = {};
+FIELD.forEach((row, r) => row.forEach((w, c) => {
+  const top = r < 6, left = c < 6;
+  const [def, sh, fu, tr] = WORDS[w];
+  FMAP[w] = { w, sh, fu, tr, def, r, c, q: (top ? 'h' : 'l') + (left ? 'u' : 'p'),
+    d: (top ? 5 - r : r - 6) + (left ? 5 - c : c - 6),
+    p: +((c - 5.5) / 2.75).toFixed(2), e: +((5.5 - r) / 2.75).toFixed(2) };
+}));
+const fieldFeeling = w => { const f = FMAP[w]; return { w: f.w, sh: f.sh, fu: f.fu, tr: f.tr, q: f.q, p: f.p, e: f.e, src: 'grid' }; };
 function wheelWord(pi, level) {
   const pet = WHEEL[pi], w = pet.words[level];
   const p = pet.p[level], e = pet.e[level];
@@ -143,11 +145,21 @@ function dyadWord(i) {
   const d = DYADS[i];
   return { w: d[0], fu: d[1], tr: d[2], src: 'wheel', dyad: i, p: d[3], e: d[4], q: (d[4] >= 0 ? 'h' : 'l') + (d[3] >= 0 ? 'p' : 'u') };
 }
+/* Every word you can pick, for search: the field plus the wheel. */
+const ALL_WORDS = (() => {
+  const out = FIELD.flat().map(fieldFeeling);
+  WHEEL.forEach((_, i) => [0, 1, 2].forEach(l => out.push(wheelWord(i, l))));
+  DYADS.forEach((_, i) => out.push(dyadWord(i)));
+  return out;
+})();
+const defOf = w => (FMAP[w] && FMAP[w].def) || WHEEL_DEFS[w] || '';
 
 /* ---------- tabs ---------- */
 let tab = 'today';
-const TITLES = { today: 'Today', journal: 'Journal', patterns: 'Patterns', tools: 'Tools', more: 'More' };
+const TITLES = { today: 'Today', journal: 'Journal', toolkit: 'Toolkit', more: 'More' };
 function go(t) {
+  if (t === 'patterns') { jView = 'patterns'; t = 'journal'; }
+  if (t === 'tools') t = 'toolkit';
   tab = t;
   document.querySelectorAll('.tabs button').forEach(b => { if (b.dataset.tab === t) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   $('#title').textContent = TITLES[t];
@@ -155,7 +167,7 @@ function go(t) {
   window.scrollTo(0, 0);
 }
 function render() {
-  ({ today: renderToday, journal: renderJournal, patterns: renderPatterns, tools: renderTools, more: renderMore })[tab]();
+  ({ today: renderToday, journal: renderJournal, toolkit: renderToolkit, more: renderMore })[tab]();
 }
 
 /* ---------- Today ---------- */
@@ -213,7 +225,7 @@ function renderToday() {
     ${today.length ? today.map(entryRow).join('') : `<div class="empty">Nothing logged yet today. A check-in takes about 20 seconds.</div>`}
   </section>
   <section class="section">
-    <button class="linkrow" data-act="tab" data-to="tools">Need something now? Open the tools<span class="d">Breathing, grounding, movement and more, sorted by what has helped you</span></button>
+    <button class="linkrow" data-act="quiz" id="t-quiz">Need something now? Help me choose<span class="d">A few quick questions, then the skills and affirmations from your toolkit that fit</span></button>
   </section>`;
 }
 function i0(d) { return dayKey(d) === dayKey(new Date()); }
@@ -237,8 +249,12 @@ function notices() {
 /* ---------- Check-in ---------- */
 let ck = null;
 const ckFields = c => JSON.stringify([c.feelings.map(f => [f.w, f.i]), c.body, c.tags, c.note.trim(), c.sleep, c.moved, c.when]);
+function newCk() {
+  return { step: 0, mode: state.settings.mode === 'wheel' ? 'wheel' : 'field', petal: null, feelings: [], focus: null, search: '',
+    fx: null, fy: null, body: [], tags: [], note: '', sleep: null, moved: null, when: null };
+}
 function startCheckin() {
-  ck = { step: 0, mode: state.settings.mode, quad: null, petal: null, feelings: [], body: [], tags: [], note: '', sleep: null, moved: null, when: null };
+  ck = newCk();
   ck.orig = ckFields(ck);
   drawCheckin();
 }
@@ -246,9 +262,10 @@ function startCheckin() {
 function editCheckin(id) {
   const e = state.entries.find(x => x.id === id); if (!e || !isCheckin(e)) return;
   const local = new Date(e.at); local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
-  ck = { editId: id, step: 0, mode: e.feelings.every(f => f.src === 'wheel') ? 'wheel' : 'grid', quad: null, petal: null,
+  ck = { ...newCk(), editId: id, mode: e.feelings.every(f => f.src === 'wheel') ? 'wheel' : 'field',
     feelings: e.feelings.map(f => ({ ...f })), body: [...(e.body || [])], tags: [...(e.tags || [])], note: e.note || '',
     sleep: e.sleep || null, moved: e.moved || null, when: local.toISOString().slice(0, 16) };
+  ck.focus = (ck.feelings[0] || {}).w || null;
   ck.orig = ckFields(ck);
   drawCheckin();
 }
@@ -269,7 +286,7 @@ function focusKey(el) {
   if (el.id) return '#' + CSS.escape(el.id);
   const a = el.dataset && el.dataset.act; if (!a) return null;
   let sel = `[data-act="${CSS.escape(a)}"]`;
-  for (const k of ['q', 'rc', 'p', 'l', 'b', 't', 'k', 'v', 'i', 'm', 'f', 'g', 'id', 'json', 'step']) {
+  for (const k of ['q', 'w', 'p', 'l', 'b', 't', 'k', 'v', 'i', 'm', 'f', 'g', 'id', 'json', 'step']) {
     if (el.dataset[k] !== undefined) sel += `[data-${k}="${CSS.escape(el.dataset[k])}"]`;
   }
   return sel;
@@ -291,7 +308,7 @@ function openSheet(html, keep) {
 function closeSheet() {
   sheet.hidden = true; sheet.innerHTML = ''; document.body.style.overflow = '';
   $('#app').inert = false;
-  ck = null; runner = null; stopBreath(); render();
+  ck = null; runner = null; kd = null; quiz = null; stopBreath(); render();
   let back = lastFocus && document.body.contains(lastFocus) ? lastFocus : (lastFocusSel && $(lastFocusSel));
   if (!back) { back = $('#title'); back.tabIndex = -1; }
   back.focus({ preventScroll: true });
@@ -301,13 +318,14 @@ function closeSheet() {
 function unsavedWork() {
   if (ck) return ckFields(ck) !== ck.orig;
   if (runner) return !!(runner.journal && runner.journal.trim());
+  if (kd) return kdFields(kd) !== kd.orig;
   return false;
 }
 function requestClose() {
   if (sheet.hidden) return;
   if ($('#guard')) return;
   if (!unsavedWork()) return closeSheet();
-  const what = ck ? (ck.editId ? 'your changes to this check-in' : 'this check-in') : 'what you wrote';
+  const what = ck ? (ck.editId ? 'your changes to this check-in' : 'this check-in') : kd ? (kd.id ? 'your changes' : 'this new item') : 'what you wrote';
   const g = document.createElement('div');
   g.id = 'guard'; g.className = 'guard';
   g.setAttribute('role', 'alertdialog'); g.setAttribute('aria-modal', 'true');
@@ -324,67 +342,102 @@ function closeGuard() {
   const h = sheet.querySelector('h2'); if (h) h.focus({ preventScroll: true });
 }
 
-const STEPS = ['Feelings', 'Body', 'Details'];
+const STEPS = ['Feelings', 'Details'];
 function drawCheckin(keepScroll) {
   const y = sheet.scrollTop;
-  const s = ck.step;
-  const body = s === 0 ? stepFeel() : s === 1 ? stepBody() : stepContext();
-  const canNext = s !== 0 || ck.feelings.length > 0;
+  const fw = $('#ck-field');
+  if (fw) { ck.fx = fw.scrollLeft; ck.fy = fw.scrollTop; }
+  const s = ck.step, n = ck.feelings.length;
+  const body = s === 0 ? stepFeel() : stepDetails();
   const top = ck.editId
     ? `<button class="btn quiet" data-act="close">Cancel</button>
        <div class="seg" role="group" aria-label="Part of the check-in">${STEPS.map((l, i) => `<button data-act="ck-step" data-step="${i}" aria-pressed="${i === s}">${l}</button>`).join('')}</div><span></span>`
     : `<button class="btn quiet" data-act="${s ? 'ck-back' : 'close'}">${s ? 'Back' : 'Cancel'}</button>
-      <div class="progress" aria-hidden="true">${STEPS.map((_, i) => `<i class="${i <= s ? 'on' : ''}"></i>`).join('')}</div>
-      <span class="step">Step ${s + 1} of 3</span>`;
+      <span class="step">${s ? 'Optional details' : n ? `${n} of ${MAX_FEEL} picked` : ''}</span>`;
   const foot = ck.editId
-    ? `<button class="btn primary" data-act="ck-save" ${ck.feelings.length ? '' : 'disabled'}>${ck.feelings.length ? 'Save changes' : 'Pick a feeling'}</button>`
-    : `${s === 1 ? `<button class="btn" data-act="ck-next">Skip</button>` : ''}
-    <button class="btn primary" data-act="${s === 2 ? 'ck-save' : 'ck-next'}" ${canNext ? '' : 'disabled'}>${s === 2 ? 'Save check-in' : s === 0 && !ck.feelings.length ? 'Pick a feeling' : 'Next'}</button>`;
+    ? `<button class="btn primary" data-act="ck-save" ${n ? '' : 'disabled'}>${n ? 'Save changes' : 'Pick a feeling'}</button>`
+    : s === 0
+      ? `<button class="btn" data-act="ck-next" ${n ? '' : 'disabled'}>Add details</button><button class="btn primary" data-act="ck-save" ${n ? '' : 'disabled'}>${n ? 'Save' : 'Pick a feeling'}</button>`
+      : `<button class="btn primary" data-act="ck-save">Save check-in</button>`;
   openSheet(`<div class="sheet-in">
     <div class="sheet-top ${ck.editId ? 'edit' : ''}">${top}</div>
     ${body}
   </div>
   <div class="sheet-foot"><div class="in">${foot}</div></div>`, keepScroll);
   if (keepScroll) sheet.scrollTop = y;
+  placeField();
 }
-function pickedList() {
-  if (!ck.feelings.length) return '';
-  return `<div class="picked" id="ck-picked">${ck.feelings.map((f, i) => `
-    <div class="p"><div class="row between"><div><span class="name">${esc(f.w)}${arOf(f) ? `<span class="ar" lang="ar" dir="rtl">${esc(arOf(f))}</span>` : ''}</span>
-      ${arOf(f) && f.tr ? `<div class="tr">${esc(f.src === 'wheel' || state.settings.arabic === 'fu' ? f.tr : f.tr)}</div>` : ''}</div>
-      <div class="row">${arOf(f) ? `<button class="say" data-act="say" data-i="${i}" aria-label="Hear it in Arabic">▸</button>` : ''}
-      <button class="btn quiet" data-act="ck-unpick" data-i="${i}" aria-label="Remove ${esc(f.w)}">Remove</button></div></div>
-      <label class="sr" for="int${i}">How strong is ${esc(f.w)}?</label>
-      <input class="range" id="int${i}" type="range" min="1" max="5" value="${f.i}" aria-valuetext="${STRENGTH[f.i - 1]}" data-act-input="ck-int" data-i="${i}">
-      <div class="range-labels" aria-hidden="true"><span>a little</span><span class="now">${STRENGTH[f.i - 1]}</span><span>very</span></div></div>`).join('')}
-    ${ck.feelings.length < MAX_FEEL ? `<p class="muted xs" style="margin:6px 0 0">Mixed feelings are normal. Add up to ${MAX_FEEL}.</p>` : ''}</div>`;
+/* Keep the field where you left it; the first time, open on the middle, where the everyday words are. */
+function placeField(zone, smooth) {
+  const el = $('#ck-field'); if (!el) return;
+  let x, y;
+  if (zone) {
+    const [r, c] = { hu: [2.5, 2.5], hp: [2.5, 8.5], lu: [8.5, 2.5], lp: [8.5, 8.5] }[zone];
+    const cell = el.scrollWidth / 12;
+    x = c * cell + cell / 2 - el.clientWidth / 2; y = r * cell + cell / 2 - el.clientHeight / 2;
+  } else if (ck.fx != null) { x = ck.fx; y = ck.fy; }
+  else { x = (el.scrollWidth - el.clientWidth) / 2; y = (el.scrollHeight - el.clientHeight) / 2; }
+  el.scrollTo({ left: x, top: y, behavior: smooth ? 'smooth' : 'auto' });
 }
 function isPicked(w) { return ck.feelings.some(f => f.w === w); }
+const arSpan = f => arOf(f) ? `<span class="ar" lang="ar" dir="rtl">${esc(arOf(f))}</span>` : '';
+/* The words you use most, newest breaking ties. */
+function usualWords(n) {
+  const c = {}, last = {};
+  state.entries.filter(isCheckin).forEach(e => e.feelings.forEach(f => { c[f.w] = (c[f.w] || 0) + 1; if (!last[f.w] || e.at > last[f.w].at) last[f.w] = { at: e.at, f }; }));
+  return Object.keys(c).sort((a, b) => c[b] - c[a] || last[b].at.localeCompare(last[a].at)).slice(0, n).map(w => last[w].f);
+}
 function stepFeel() {
-  const seg = `<div class="seg" role="group" aria-label="Check-in style"><button data-act="ck-mode" data-m="grid" aria-pressed="${ck.mode === 'grid'}">Grid</button><button data-act="ck-mode" data-m="wheel" aria-pressed="${ck.mode === 'wheel'}">Wheel</button></div>`;
+  const seg = `<div class="seg" role="group" aria-label="Check-in style"><button data-act="ck-mode" data-m="field" aria-pressed="${ck.mode === 'field'}">Words</button><button data-act="ck-mode" data-m="wheel" aria-pressed="${ck.mode === 'wheel'}">Wheel</button></div>`;
+  const usual = usualWords(8);
+  const usualHtml = usual.length && !ck.editId ? `<div class="usual"><span class="lbl2">Your usual</span><div class="chips">${usual.map(f => `<button class="chip" data-act="ck-pick" data-json='${esc(JSON.stringify(fieldOrWheel(f)))}' aria-pressed="${isPicked(f.w)}"><i class="cdot" style="background:${QCOL[f.q]}" aria-hidden="true"></i>${esc(f.w)}</button>`).join('')}</div></div>` : '';
   let inner;
-  if (ck.mode === 'grid') {
-    if (!ck.quad) {
-      const cnt = q => ck.feelings.filter(f => f.q === q).length;
-      inner = `<div class="axis"><span>↑ more energy</span></div>
-      <div class="plane">${QORDER.map(q => `<button class="quad ${q}" data-act="ck-quad" data-q="${q}"><span>${QUADS[q].name}</span><b>${QUADS[q].short}</b><span class="count">${cnt(q) ? cnt(q) + ' picked' : ''}</span></button>`).join('')}</div>
-      <div class="axis"><span>less pleasant</span><span>more pleasant →</span></div>`;
-    } else {
-      const q = ck.quad, m = GRIDMAP[q];
-      let cells = '';
-      for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
-        const w = m[r + ',' + c];
-        const pct = Math.max(12, 62 - w.d * 9);
-        const a = arOf({ ...w, src: 'grid' });
-        cells += `<button class="word${w.w.length > 10 ? ' long' : ''}" data-act="ck-word" data-q="${q}" data-rc="${r},${c}" aria-pressed="${isPicked(w.w)}" style="background:color-mix(in srgb, ${QCOL[q]} calc(${pct}% * var(--tile-k)), var(--surface))">${esc(w.w)}${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
-      }
-      inner = `<div class="row between" style="margin-top:12px"><button class="btn quiet" data-act="ck-quad" data-q="">← All four</button><span class="muted small">${QUADS[q].name}</span></div>
-      <div class="words">${cells}</div><p class="muted xs">Stronger feelings sit toward the outer corner.</p>`;
-    }
+  if (ck.mode === 'field') {
+    let cells = '';
+    FIELD.forEach(row => row.forEach(w => {
+      const f = FMAP[w];
+      const a = arOf({ ...f, src: 'grid' });
+      cells += `<button class="fw${w.length > 10 ? ' long' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:${QCOL[f.q]};--k:${Math.round(12 + f.d * 5)}%">${esc(w)}${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
+    }));
+    inner = `<div class="zones" role="group" aria-label="Jump to an area">${[['hu', '↖'], ['hp', '↗'], ['lu', '↙'], ['lp', '↘']].map(([q, arr]) => `<button class="zone-btn" data-act="ck-zone" data-q="${q}" style="--c:${QCOL[q]}"><span aria-hidden="true">${arr}</span> ${QUADS[q].short}<span class="sr">: ${QUADS[q].name.toLowerCase()}</span></button>`).join('')}</div>
+      <div class="field-wrap" id="ck-field" tabindex="-1"><div class="field" role="group" aria-label="Feeling words. Up is more energy, right is more pleasant.">${cells}</div></div>
+      <p class="muted xs field-hint">Drag around to explore. Up is more energy, right is more pleasant, and the strongest feelings sit in the corners.</p>`;
   } else {
     inner = wheelSvg() + petalPanel();
   }
-  return `<h2>How are you feeling?</h2><div class="row between">${seg}</div>${inner}${pickedList()}`;
+  return `<h2>How are you feeling?</h2>
+    <div class="find"><label class="sr" for="ck-search">Search for a feeling</label><input id="ck-search" type="search" placeholder="Search feelings" autocomplete="off" value="${esc(ck.search)}" data-act-input="ck-search">${seg}</div>
+    <div id="ck-results">${searchResults()}</div>
+    <div id="ck-browse" ${ck.search.trim() ? 'hidden' : ''}>${usualHtml}${inner}</div>
+    ${pickCard()}`;
+}
+/* A saved feeling, refreshed from the current word list when it still exists. */
+function fieldOrWheel(f) { return f.src !== 'wheel' && FMAP[f.w] ? fieldFeeling(f.w) : { w: f.w, src: f.src, q: f.q, p: f.p, e: f.e, sh: f.sh, fu: f.fu, tr: f.tr }; }
+function searchResults() {
+  const s = ck.search.trim().toLowerCase();
+  if (!s) return '';
+  const scored = ALL_WORDS.map(f => {
+    const w = f.w.toLowerCase(), d = defOf(f.w).toLowerCase();
+    const sc = w.startsWith(s) ? 3 : w.includes(s) ? 2 : d.includes(s) ? 1 : 0;
+    return { f, sc };
+  }).filter(x => x.sc).sort((a, b) => b.sc - a.sc || a.f.w.localeCompare(b.f.w)).slice(0, 12);
+  if (!scored.length) return `<p class="muted small">No words match “${esc(ck.search.trim())}”. Try a simpler word, or clear the search to browse.</p>`;
+  return `<p class="muted xs" id="ck-res-n" aria-live="polite">${scored.length} match${scored.length === 1 ? '' : 'es'}</p><div class="results">${scored.map(({ f }) => `<button class="res" data-act="ck-pick" data-json='${esc(JSON.stringify(f))}' aria-pressed="${isPicked(f.w)}"><i class="qdot" style="background:${QCOL[f.q]}" aria-hidden="true"></i><span><b>${esc(f.w)}</b><span class="d">${esc(defOf(f.w))}${f.src === 'wheel' ? ' (wheel)' : ''}</span></span></button>`).join('')}</div>`;
+}
+/* The card for the feeling you're looking at: its meaning and how strong it is. Sticks above the Save bar. */
+function pickCard() {
+  if (!ck.feelings.length) return `<div class="pick-card empty-card" id="ck-picked"><p class="muted small" style="margin:0">Tap a word to see what it means. Pick up to ${MAX_FEEL}; mixed feelings are normal.</p></div>`;
+  let i = ck.feelings.findIndex(f => f.w === ck.focus); if (i < 0) i = ck.feelings.length - 1;
+  const f = ck.feelings[i];
+  const others = ck.feelings.length > 1 ? `<div class="chips picked-chips" role="group" aria-label="Your picks">${ck.feelings.map((x, k) => `<button class="chip small" data-act="ck-focus" data-w="${esc(x.w)}" aria-pressed="${k === i}"><i class="cdot" style="background:${QCOL[x.q]}" aria-hidden="true"></i>${esc(x.w)}</button>`).join('')}</div>` : '';
+  return `<div class="pick-card" id="ck-picked" style="--c:${QCOL[f.q]}">
+    <div class="row between nowrap"><div><span class="pw">${esc(f.w)}</span>${arSpan(f)}${arOf(f) && f.tr ? `<div class="tr">${esc(f.tr)}</div>` : ''}</div>
+      <div class="row nowrap">${arOf(f) ? `<button class="say" data-act="say" data-i="${i}" aria-label="Hear it in Arabic">▸</button>` : ''}<button class="btn quiet" data-act="ck-unpick" data-i="${i}" aria-label="Remove ${esc(f.w)}">Remove</button></div></div>
+    <p class="def">${esc(defOf(f.w))}</p>
+    <label class="sr" for="int${i}">How strong is ${esc(f.w)}?</label>
+    <input class="range" id="int${i}" type="range" min="1" max="5" value="${f.i}" aria-valuetext="${STRENGTH[f.i - 1]}" data-act-input="ck-int" data-i="${i}">
+    <div class="range-labels" aria-hidden="true"><span>a little</span><span class="now">${STRENGTH[f.i - 1]}</span><span>very</span></div>
+    ${others}</div>`;
 }
 const PETAL_COL = ['#d9a91a', '#8fb33a', '#2f9a74', '#2c9bb5', '#4f74c4', '#8d6cc0', '#c8702c', '#d58a2a'];
 function wheelSvg() {
@@ -409,18 +462,22 @@ function wheelSvg() {
 function petalPanel() {
   if (ck.petal == null) return `<p class="muted small" style="text-align:center">Tap a band: the center is strongest, the edge is mildest. Then you can add a blend.</p>`;
   const i = ck.petal, pet = WHEEL[i];
-  const chip = (f, lab) => `<button class="chip" data-act="ck-wheelword" data-json='${esc(JSON.stringify(f))}' aria-pressed="${isPicked(f.w)}">${esc(lab || f.w)}</button>`;
+  const chip = (f, lab) => `<button class="chip" data-act="ck-pick" data-json='${esc(JSON.stringify(f))}' aria-pressed="${isPicked(f.w)}">${esc(lab || f.w)}</button>`;
   const prev = (i + 7) % 8;
   return `<div class="petal-pick"><h3>${pet.id}</h3>
     <div class="chips">${[2, 1, 0].map(l => chip(wheelWord(i, l), pet.words[l][0] + (l === 2 ? ' (mild)' : l === 0 ? ' (strong)' : ''))).join('')}</div>
     <p class="muted xs" style="margin:10px 0 6px">Blends with its neighbours</p>
     <div class="chips">${chip(dyadWord(prev), `${DYADS[prev][0]} (${WHEEL[prev].id} + ${pet.id})`)}${chip(dyadWord(i), `${DYADS[i][0]} (${pet.id} + ${WHEEL[(i + 1) % 8].id})`)}</div></div>`;
 }
+/* Tap once to pick a word (and read its meaning); tap a picked word again to let it go. */
 function addFeeling(f) {
   const at = ck.feelings.findIndex(x => x.w === f.w);
-  if (at >= 0) { ck.feelings.splice(at, 1); return; }
+  if (at >= 0) {
+    if (ck.focus !== f.w) { ck.focus = f.w; return; }
+    ck.feelings.splice(at, 1); ck.focus = (ck.feelings[ck.feelings.length - 1] || {}).w || null; return;
+  }
   if (ck.feelings.length >= MAX_FEEL) { toast(`Up to ${MAX_FEEL} feelings. Remove one first.`); return; }
-  ck.feelings.push({ ...f, i: 3 });
+  ck.feelings.push({ ...f, i: 3 }); ck.focus = f.w;
 }
 function bodySvg() {
   const on = id => ck.body.includes(id) ? ' on' : '';
@@ -439,19 +496,18 @@ function bodySvg() {
     ${z('feet', '<path d="M56 304 L76 304 L76 316 L50 316Z M84 304 L104 304 L110 316 L84 316Z"/>')}
   </svg>`;
 }
-function stepBody() {
-  return `<h2>Where do you feel it?</h2><p class="muted">Tap any places that feel tight, heavy, warm, buzzy or different. Skip if nothing stands out.</p>
-  <div class="bodywrap">${bodySvg()}<div class="chips">${BODY.map(b => `<button class="chip" data-act="ck-body" data-b="${b[0]}" aria-pressed="${ck.body.includes(b[0])}">${b[1]}</button>`).join('')}</div></div>`;
-}
-function stepContext() {
+function stepDetails() {
   const dom = ck.feelings.slice().sort((a, b) => b.i - a.i)[0];
-  const group = (g, label) => `<label class="lbl">${label}</label><div class="chips">${tagsFor(g).map(t => `<button class="chip" data-act="ck-tag" data-t="${esc(t)}" aria-pressed="${ck.tags.includes(t)}">${esc(t)}</button>`).join('')}<button class="chip add" data-act="ck-addtag" data-g="${g}">+ Add</button></div>`;
+  const group = (g, label) => `<h3 class="lbl">${label}</h3><div class="chips">${tagsFor(g).map(t => `<button class="chip" data-act="ck-tag" data-t="${esc(t)}" aria-pressed="${ck.tags.includes(t)}">${esc(t)}</button>`).join('')}<button class="chip add" data-act="ck-addtag" data-g="${g}">+ Add</button></div>`;
   const opt = (k, v, l) => `<button class="chip" data-act="ck-opt" data-k="${k}" data-v="${v}" aria-pressed="${ck[k] === v}">${l}</button>`;
   const now = new Date(ck.when || Date.now()); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-  return `<h2>What's going on?</h2><p class="muted">All optional. Tags are what make Patterns useful.</p>
+  const names = ck.feelings.map(f => f.w).join(', ');
+  return `<h2>Anything else?</h2><p class="muted">All optional${names ? ` for <b>${esc(names)}</b>` : ''}. Tags are what make Patterns useful.</p>
+  <h3 class="lbl">Where you feel it</h3>
+  <div class="bodywrap">${bodySvg()}<div class="chips">${BODY.map(b => `<button class="chip" data-act="ck-body" data-b="${b[0]}" aria-pressed="${ck.body.includes(b[0])}">${b[1]}</button>`).join('')}</div></div>
   ${group('people', 'Who with')}${group('places', 'Where')}${group('doing', 'Doing')}
-  <label class="lbl">Sleep last night</label><div class="chips">${opt('sleep', 'short', 'Short')}${opt('sleep', 'ok', 'OK')}${opt('sleep', 'good', 'Good')}</div>
-  <label class="lbl">Moved your body today</label><div class="chips">${opt('moved', 'yes', 'Yes')}${opt('moved', 'no', 'Not yet')}</div>
+  <h3 class="lbl">Sleep last night</h3><div class="chips">${opt('sleep', 'short', 'Short')}${opt('sleep', 'ok', 'OK')}${opt('sleep', 'good', 'Good')}</div>
+  <h3 class="lbl">Moved your body today</h3><div class="chips">${opt('moved', 'yes', 'Yes')}${opt('moved', 'no', 'Not yet')}</div>
   <label class="lbl" for="ck-note">Note</label>
   <textarea id="ck-note" placeholder="${esc(PROMPTS[dom ? dom.q : 'lp'])}" data-act-input="ck-note">${esc(ck.note)}</textarea>
   <label class="lbl" for="ck-when">When</label>
@@ -475,49 +531,100 @@ function saveCheckin() {
   ck = null;
   afterSave(e);
 }
+/* What we know about how you feel, for suggestions. */
+const feelAsk = e => { const top = e.feelings.slice().sort((a, b) => b.i - a.i)[0]; return { q: top.q, words: e.feelings.map(f => f.w), i: top.i }; };
 function afterSave(e) {
-  const q = domQ(e);
-  const picks = suggestTools(q).slice(0, 3);
+  const a = feelAsk(e);
+  const ranked = rankKit(a);
+  const picks = ranked.filter(x => x.it.type === 'skill').slice(0, 3);
+  const hold = ranked.find(x => x.it.type !== 'skill' && x.s > 0);
   ck = null;
   openSheet(`<div class="sheet-in"><div class="sheet-top"><span></span><button class="btn quiet" data-act="close">Done</button></div>
     <h2>Logged.</h2>
     <p>${e.feelings.map(f => `<b>${esc(f.w)}</b>`).join(', ')}${e.body.length ? ` · felt in your ${e.body.map(b => (BODY.find(x => x[0] === b) || [b, b])[1].toLowerCase()).join(', ')}` : ''}.</p>
-    <p class="muted">Naming it is already doing something. Want to try a tool?</p>
-    ${picks.map(t => toolRow(t, e.id)).join('')}
-    <div style="margin-top:20px"><button class="btn block" data-act="close">Not now</button></div>
-    ${q === 'lu' ? crisisLine() : ''}</div>`);
-}
-function suggestTools(q) {
-  return allTools().filter(t => t.q.includes(q)).sort((a, b) => {
-    const sa = toolStats(a.id), sb = toolStats(b.id);
-    return (sb.n ? sb.avg : 0.4) - (sa.n ? sa.avg : 0.4) || a.min - b.min;
-  });
+    <p class="muted">Naming it is already doing something.${picks.length ? ' Want to try something from your toolkit?' : ''}</p>
+    ${hold ? quoteCard(hold.it, e.id) : ''}
+    ${picks.map(x => kitRow(x.it, e.id, x.why)).join('')}
+    <div class="row" style="margin-top:16px"><button class="btn" data-act="quiz" data-id="${esc(e.id)}">Help me choose</button><button class="btn quiet" data-act="close">Not now</button></div>
+    ${a.q === 'lu' || a.i >= 4 && unpleasant(a.q) ? crisisLine() : ''}</div>`);
 }
 const crisisLine = () => `<p class="crisis">If you're in crisis or thinking about hurting yourself, call or text <b>988</b> (US) any time, or text HOME to 741741.</p>`;
 
-/* ---------- Tools ---------- */
-function toolRow(t, entryId) {
-  const s = toolStats(t.id);
-  return `<button class="tool" data-act="run-tool" data-id="${esc(t.id)}" ${entryId ? `data-entry="${esc(entryId)}"` : ''}>
-    <span><span class="n">${esc(t.name)}</span><span class="qdots" aria-hidden="true">${t.q.map(q => `<i style="background:${QCOL[q]}"></i>`).join('')}</span>
-    <span class="k" style="display:block">${esc(t.kind || 'Your tool')} · about ${t.min || 3} min</span></span>
-    <span class="h">${s.n ? `helped ${s.helped} of ${s.n}` : ''}</span></button>`;
+/* ---------- Toolkit ---------- */
+const TYPE = Object.fromEntries(KIT_TYPES.map(([k, one, many]) => [k, { one, many }]));
+const NEED = Object.fromEntries(NEEDS);
+function builtIns(all) {
+  return TOOLS.filter(t => all || ((state.settings.faith || !t.optional) && !state.hiddenBuiltIns.includes(t.id)))
+    .map(t => ({ id: t.id, type: 'skill', title: t.name, body: t.why, steps: t.steps, q: t.q, needs: t.needs, tags: [], min: t.min, anywhere: t.anywhere, kind: t.kind, timer: t.timer, journal: t.journal, builtIn: true }));
 }
-let toolFilter = 'all';
-function renderTools() {
-  const list = allTools().filter(t => toolFilter === 'all' || t.q.includes(toolFilter));
-  const tried = list.filter(t => toolStats(t.id).n).sort((a, b) => toolStats(b.id).avg - toolStats(a.id).avg);
-  const rest = list.filter(t => !toolStats(t.id).n);
-  view.innerHTML = `<p class="muted">After each tool, you say whether it helped. The ones that work for you rise to the top.</p>
-  <div class="chips" style="margin-bottom:12px"><button class="chip" data-act="tool-filter" data-f="all" aria-pressed="${toolFilter === 'all'}">All</button>${QORDER.map(q => `<button class="chip" data-act="tool-filter" data-f="${q}" aria-pressed="${toolFilter === q}">${QUADS[q].short}</button>`).join('')}</div>
-  ${tried.length ? `<h2>What's helped you</h2>${tried.map(t => toolRow(t)).join('')}` : ''}
-  <h2>${tried.length ? 'Not tried yet' : 'All tools'}</h2>${rest.map(t => toolRow(t)).join('') || '<p class="muted">You\'ve tried them all.</p>'}
-  <div style="margin-top:16px"><button class="btn" data-act="add-tool">Add your own tool</button></div>
+const kitAll = () => [...state.kit, ...builtIns()];
+/* Finds an item even if it's hidden, so old check-ins and stats still have a name. */
+const findItem = id => state.kit.find(x => x.id === id) || builtIns(true).find(x => x.id === id);
+const itemName = id => (findItem(id) || { title: 'a tool that was deleted' }).title;
+function toolStats(id) {
+  const u = state.toolUses.filter(x => x.id === id && x.result != null);
+  const helped = u.filter(x => x.result > 0).length;
+  return { n: u.length, helped, avg: u.length ? u.reduce((s, x) => s + x.result, 0) / u.length : 0 };
+}
+/* How well an item fits: feelings it's tagged for, its zone, the need, the time you have,
+   whether people are around, and whether it has helped before. Your own items come first. */
+function scoreItem(it, a) {
+  let s = 0; const why = [];
+  const tags = (it.tags || []).map(t => t.toLowerCase());
+  const hitWords = (a.words || []).filter(w => tags.includes(w.toLowerCase()));
+  if (hitWords.length) { s += 5; why.push(`tagged ${hitWords.join(', ')}`); }
+  if (a.q) { if ((it.q || []).includes(a.q)) s += 3; else if ((it.q || []).length) s -= 2; }
+  if (a.need) { if ((it.needs || []).includes(a.need)) { s += 4; why.push(NEED[a.need].toLowerCase()); } else s -= 1; }
+  if (a.time && it.type === 'skill' && (it.min || 5) > a.time) s -= 5;
+  if (a.alone === false && it.anywhere === false) s -= 4;
+  if (a.i >= 4 && (it.needs || []).includes('think') && !(it.needs || []).some(n => n === 'calm' || n === 'ground')) s -= 2;
+  if (a.i >= 4 && (it.needs || []).some(n => n === 'calm' || n === 'ground')) s += 1;
+  if (!it.builtIn) { s += 2; why.unshift('yours'); }
+  if (it.fav) s += 1;
+  const st = toolStats(it.id);
+  if (st.n) { s += 3 * st.helped / st.n - 1; why.push(`helped ${st.helped} of ${st.n}`); }
+  return { it, s, why };
+}
+const rankKit = a => kitAll().map(it => scoreItem(it, a)).filter(x => x.s > 0).sort((x, y) => y.s - x.s || (x.it.min || 0) - (y.it.min || 0));
+function kitRow(it, entryId, why) {
+  if (it.type !== 'skill') return quoteCard(it, entryId, why);
+  const s = toolStats(it.id);
+  const sub = why && why.length ? why.join(' · ') : `${it.builtIn ? it.kind : TYPE.skill.one}${it.min ? ` · about ${it.min} min` : ''}${!it.builtIn && it.tags && it.tags.length ? ' · ' + it.tags.join(', ') : ''}`;
+  return `<button class="tool" data-act="run-tool" data-id="${esc(it.id)}" ${entryId ? `data-entry="${esc(entryId)}"` : ''}>
+    <span><span class="n">${it.fav ? '<span aria-label="Favorite">★ </span>' : ''}${esc(it.title)}</span><span class="qdots" aria-hidden="true">${(it.q || []).map(q => `<i style="background:${QCOL[q]}"></i>`).join('')}</span>
+    <span class="k" style="display:block">${esc(sub)}</span></span>
+    <span class="h">${s.n && !(why && why.length) ? `helped ${s.helped} of ${s.n}` : ''}</span></button>`;
+}
+function quoteCard(it, entryId, why) {
+  const sub = why && why.length ? why.join(' · ') : [TYPE[it.type].one, it.source].filter(Boolean).join(' · ');
+  return `<button class="kit-quote ${it.type}" data-act="run-tool" data-id="${esc(it.id)}" ${entryId ? `data-entry="${esc(entryId)}"` : ''}>
+    <span class="t">${esc(it.title)}</span>${it.type === 'note' && it.body ? `<span class="b">${esc(it.body)}</span>` : ''}<span class="k">${esc(sub)}</span></button>`;
+}
+let kitType = 'all', kitSearch = '';
+function renderToolkit() {
+  const s = kitSearch.trim().toLowerCase();
+  const match = it => (kitType === 'all' || it.type === kitType) && (!s || JSON.stringify([it.title, it.body, it.steps, it.tags, it.source]).toLowerCase().includes(s));
+  const mine = state.kit.filter(match).sort((a, b) => (b.fav ? 1 : 0) - (a.fav ? 1 : 0) || (b.at || '').localeCompare(a.at || ''));
+  const built = builtIns().filter(match);
+  const tried = built.filter(t => toolStats(t.id).n).sort((a, b) => toolStats(b.id).avg - toolStats(a.id).avg);
+  const rest = built.filter(t => !toolStats(t.id).n);
+  const hidden = state.hiddenBuiltIns.length;
+  view.innerHTML = `<section class="hero kit-hero">
+    <p style="margin:0 0 12px">Your skills, affirmations and notes from therapy, in one place. Tag them with the feelings they help with, and <b>Help me choose</b> will find them when you need them.</p>
+    <button class="btn primary block" data-act="quiz" id="k-quiz">Help me choose</button>
+    <div class="row" style="margin-top:10px"><button class="btn" data-act="kit-add" style="flex:1">Add your own</button><button class="btn" data-act="kit-starters" style="flex:1">Starter ideas</button></div>
+  </section>
+  <label class="sr" for="ksearch">Search your toolkit</label><input id="ksearch" type="search" placeholder="Search your toolkit" value="${esc(kitSearch)}" data-act-input="k-search">
+  <div class="chips" role="group" aria-label="Show" style="margin:12px 0">${[['all', 'All'], ...KIT_TYPES.map(([k, , many]) => [k, many])].map(([k, l]) => `<button class="chip" data-act="kit-type" data-f="${k}" aria-pressed="${kitType === k}">${l}</button>`).join('')}</div>
+  <h2>Yours</h2>
+  ${mine.length ? mine.map(it => kitRow(it)).join('') : state.kit.length ? `<p class="muted">Nothing of yours matches.</p>` : `<div class="empty">Nothing of yours yet. Add a skill, affirmation or note from therapy, or start from the starter ideas.</div>`}
+  ${built.length ? `<h2>Built in</h2>${tried.map(t => kitRow(t)).join('')}${rest.map(t => kitRow(t)).join('')}` : ''}
+  ${hidden && (kitType === 'all' || kitType === 'skill') && !s ? `<button class="btn quiet" data-act="kit-unhide" style="margin-top:8px">Show ${hidden} hidden built-in skill${hidden === 1 ? '' : 's'}</button>` : ''}
   ${crisisLine()}`;
 }
 let runner = null;
 function runTool(id, entryId) {
-  const t = allTools().find(x => x.id === id) || [...TOOLS, ...state.customTools].find(x => x.id === id);
+  const t = findItem(id);
   if (!t) return;
   runner = { t, entryId, result: null, journal: '' };
   drawRunner();
@@ -525,15 +632,21 @@ function runTool(id, entryId) {
 function drawRunner() {
   const { t } = runner;
   const res = [[-1, 'Worse'], [0, 'About the same'], [1, 'A bit better'], [2, 'Better']];
-  const custom = state.customTools.some(c => c.id === t.id);
-  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">${esc(t.kind || 'Your tool')}</span></div>
-    <h2>${esc(t.name)}</h2>${t.why ? `<p class="muted">${esc(t.why)}</p>` : ''}
+  const quote = t.type === 'affirmation' || t.type === 'reminder';
+  const st = toolStats(t.id);
+  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">${esc(t.builtIn ? t.kind : TYPE[t.type].one)}</span>${t.builtIn ? '' : `<button class="btn quiet" data-act="kit-edit" data-id="${esc(t.id)}">Edit</button>`}</div>
+    <h2 class="${quote ? 'say-big' : ''}">${esc(t.title)}</h2>
+    ${quote ? `<p class="muted">Read it slowly. Out loud, if you can.</p>` : ''}
+    ${t.body ? `<p class="${t.type === 'note' ? 'entry-note' : 'muted'}">${esc(t.body)}</p>` : ''}
     ${t.timer === 'box' ? `<div class="breather"><div class="ring" id="ring"></div><div class="lbl2" id="phase">Ready</div></div><div style="text-align:center"><button class="btn" data-act="breath">Start</button></div>` : ''}
-    <ol class="steps">${t.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
+    ${t.steps && t.steps.length ? `<ol class="steps">${t.steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>` : ''}
+    ${!t.builtIn && (t.tags || []).length + (t.needs || []).length ? `<p class="muted small">${[...(t.needs || []).map(n => NEED[n]), ...(t.tags || [])].map(esc).join(' · ')}</p>` : ''}
+    ${t.source ? `<p class="muted small">From: ${esc(t.source)}</p>` : ''}
     ${t.journal ? `<label class="lbl" for="tj">Write it here (optional, saved to your journal)</label><textarea id="tj" data-act-input="tool-journal">${esc(runner.journal)}</textarea>` : ''}
-    <h3>Compared to before, you feel…</h3>
+    <h3>${quote || t.type === 'note' ? 'Did it help?' : 'Compared to before, you feel…'}</h3>
     <div class="chips">${res.map(([v, l]) => `<button class="chip" data-act="tool-res" data-v="${v}" aria-pressed="${runner.result === v}">${l}</button>`).join('')}</div>
-    ${custom ? `<div style="margin-top:28px"><button class="btn danger" data-act="del-tool" data-id="${t.id}">Delete this tool</button></div>` : ''}
+    ${st.n ? `<p class="muted xs" style="margin-top:8px">Helped ${st.helped} of ${st.n} times so far.</p>` : ''}
+    ${t.builtIn ? `<div style="margin-top:28px"><button class="btn quiet" data-act="kit-hide" data-id="${esc(t.id)}">Hide from my toolkit</button></div>` : ''}
   </div><div class="sheet-foot"><div class="in"><button class="btn primary" data-act="tool-save" ${runner.result == null ? 'disabled' : ''}>Save</button></div></div>`);
 }
 let breathT = null;
@@ -558,10 +671,10 @@ function saveTool() {
   const e = entryId && state.entries.find(x => x.id === entryId);
   if (e) {
     e.tool = { id: t.id, result };
-    if (note) { e.note = (e.note ? e.note + '\n\n' : '') + `${t.name}: ${note}`; savedNote = true; }
+    if (note) { e.note = (e.note ? e.note + '\n\n' : '') + `${t.title}: ${note}`; savedNote = true; }
   } else if (note) {
-    // Opened from the Tools tab: keep the writing as its own journal entry.
-    state.entries.push({ id: uid(), at, feelings: [], body: [], tags: [], note, toolOnly: true, toolName: t.name, tool: { id: t.id, result } });
+    // Opened from the Toolkit: keep the writing as its own journal entry.
+    state.entries.push({ id: uid(), at, feelings: [], body: [], tags: [], note, toolOnly: true, toolName: t.title, tool: { id: t.id, result } });
     savedNote = true;
   }
   state.toolUses.push({ id: t.id, at, entryId: e ? e.id : null, result });
@@ -570,23 +683,140 @@ function saveTool() {
   const how = result > 0 ? 'Glad it helped.' : 'Good to know what doesn\'t help, too.';
   toast(savedNote ? `${how} Your note is in the Journal.` : `${how} Saved.`);
 }
-function addToolSheet() {
+
+/* ---------- adding and editing your own items ---------- */
+let kd = null;
+const kdFields = k => JSON.stringify([k.type, k.title.trim(), k.body.trim(), k.steps.trim(), k.q, k.needs, k.tags.trim(), k.min, k.anywhere, k.source.trim(), k.fav]);
+function editKit(id, from) {
+  const it = id && state.kit.find(x => x.id === id);
+  const src = it || from || {};
   runner = null;
-  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Cancel</button><span class="step">New tool</span></div>
-  <h2>Add your own tool</h2>
-  <label class="lbl" for="nt-name">Name</label><input id="nt-name" type="text" placeholder="e.g. Call Mom, Play guitar, Cold water on my face">
-  <label class="lbl" for="nt-steps">Steps, one per line</label><textarea id="nt-steps" placeholder="What you do, in order"></textarea>
-  <label class="lbl">Good for</label><div class="chips" id="nt-q">${QORDER.map(q => `<button class="chip" data-act="nt-q" data-q="${q}" aria-pressed="false">${QUADS[q].short}</button>`).join('')}</div>
-  </div><div class="sheet-foot"><div class="in"><button class="btn primary" data-act="nt-save">Save tool</button></div></div>`);
+  kd = { id: it ? it.id : null, type: src.type || 'skill', title: src.title || '', body: src.body || '', steps: (src.steps || []).join('\n'),
+    q: [...(src.q || [])], needs: [...(src.needs || [])], tags: (src.tags || []).join(', '), min: src.min || 5,
+    anywhere: src.anywhere !== false, source: src.source || '', fav: !!src.fav };
+  kd.orig = it ? kdFields(kd) : kdFields({ ...kd, title: '', body: '', steps: '', q: [], needs: [], tags: '', source: '' });
+  drawKitEdit();
+}
+function drawKitEdit(keep) {
+  const k = kd, skill = k.type === 'skill';
+  const titleL = { skill: 'Name', affirmation: 'Affirmation', reminder: 'Reminder', note: 'Title' }[k.type];
+  const titleP = { skill: 'e.g. TIPP, Wise mind, Call my sister', affirmation: 'e.g. I am safe right now.', reminder: 'e.g. Feelings pass.', note: 'e.g. What Sarah said about boundaries' }[k.type];
+  const bodyL = { skill: 'What it is, or why it helps (optional)', affirmation: 'When to use it (optional)', reminder: 'More detail (optional)', note: 'Note' }[k.type];
+  const big = k.type === 'affirmation' || k.type === 'reminder';
+  const chip = (act, v, label, on) => `<button class="chip" data-act="${act}" data-v="${v}" aria-pressed="${on}">${label}</button>`;
+  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Cancel</button><span class="step">${k.id ? 'Edit' : 'New'}</span><span></span></div>
+  <h2>${k.id ? 'Edit' : 'Add to your toolkit'}</h2>
+  <div class="seg wrap" role="group" aria-label="Kind">${KIT_TYPES.map(([v, l]) => `<button data-act="kd-type" data-v="${v}" aria-pressed="${k.type === v}">${l}</button>`).join('')}</div>
+  <label class="lbl" for="kd-title">${titleL}</label>
+  ${big ? `<textarea id="kd-title" class="short" placeholder="${esc(titleP)}" data-act-input="kd" data-k="title">${esc(k.title)}</textarea>` : `<input id="kd-title" type="text" placeholder="${esc(titleP)}" value="${esc(k.title)}" data-act-input="kd" data-k="title">`}
+  <label class="lbl" for="kd-body">${bodyL}</label>
+  <textarea id="kd-body" class="${k.type === 'note' ? '' : 'short'}" data-act-input="kd" data-k="body">${esc(k.body)}</textarea>
+  ${skill ? `<label class="lbl" for="kd-steps">Steps, one per line (optional)</label><textarea id="kd-steps" placeholder="What you do, in order" data-act-input="kd" data-k="steps">${esc(k.steps)}</textarea>` : ''}
+  <h3 class="lbl">Good when I'm feeling</h3>
+  <div class="chips">${QORDER.map(q => chip('kd-q', q, `<i class="cdot" style="background:${QCOL[q]}" aria-hidden="true"></i>${QUADS[q].short}`, k.q.includes(q))).join('')}</div>
+  <label class="lbl" for="kd-tags">Feelings and tags</label>
+  <input id="kd-tags" type="text" placeholder="e.g. anxious, panic, angry, work, DBT" value="${esc(k.tags)}" aria-describedby="kd-tags-d" data-act-input="kd" data-k="tags">
+  <p class="muted xs" id="kd-tags-d" style="margin-top:6px">Separate with commas. Feeling words here (like anxious or lonely) are how Help me choose finds it after you log that feeling.</p>
+  <h3 class="lbl">It helps me</h3>
+  <div class="chips">${NEEDS.map(([v, l]) => chip('kd-need', v, l, k.needs.includes(v))).join('')}</div>
+  ${skill ? `<h3 class="lbl">Takes about</h3><div class="chips">${[[1, '1 minute'], [5, '5 minutes'], [15, '15 minutes or more']].map(([v, l]) => chip('kd-min', v, l, k.min === v)).join('')}</div>
+  <h3 class="lbl">Can I do it with people around?</h3><div class="chips">${chip('kd-any', 'yes', 'Yes', k.anywhere)}${chip('kd-any', 'no', 'Better alone', !k.anywhere)}</div>` : ''}
+  <label class="lbl" for="kd-source">From (optional)</label>
+  <input id="kd-source" type="text" placeholder="e.g. therapy, DBT group, a book" value="${esc(k.source)}" data-act-input="kd" data-k="source">
+  <div style="margin-top:16px">${chip('kd-fav', 'fav', '★ Favorite', k.fav)}</div>
+  ${k.id ? `<div style="margin-top:28px"><button class="btn danger" data-act="kd-del" data-id="${esc(k.id)}">Delete</button></div>` : ''}
+  </div><div class="sheet-foot"><div class="in"><button class="btn primary" data-act="kd-save">Save</button></div></div>`, keep);
+}
+function saveKit() {
+  const k = kd;
+  if (!k.title.trim()) { toast(k.type === 'skill' ? 'Give it a name.' : 'Write the words first.'); const t = $('#kd-title'); if (t) t.focus(); return; }
+  const item = { id: k.id || 'k-' + uid(), type: k.type, title: k.title.trim().slice(0, 300), body: k.body.trim(),
+    steps: k.type === 'skill' ? k.steps.split('\n').map(s => s.trim()).filter(Boolean) : [],
+    q: k.q, needs: k.needs, tags: [...new Set(k.tags.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))].slice(0, 20),
+    min: k.type === 'skill' ? k.min : 1, anywhere: k.type === 'skill' ? k.anywhere : true, source: k.source.trim(), fav: k.fav };
+  const at = state.kit.findIndex(x => x.id === item.id);
+  if (at >= 0) state.kit[at] = { ...state.kit[at], ...item }; else state.kit.push({ ...item, at: new Date().toISOString() });
+  save(); kd = null; closeSheet(); toast(at >= 0 ? 'Saved.' : `Added to your toolkit.`);
+}
+function startersSheet() {
+  const have = new Set(state.kit.map(x => x.title.toLowerCase()));
+  const groups = KIT_TYPES.filter(([k]) => STARTERS.some(s => s.type === k));
+  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">Starter ideas</span><span></span></div>
+  <h2>Starter ideas</h2>
+  <p class="muted">Common skills from therapy, described in plain words, and a few affirmations. Add any that fit, then edit them to match how your therapist taught them. Your own words always work better than these.</p>
+  ${groups.map(([k, , many]) => `<h3>${many}</h3>${STARTERS.map((s, i) => [s, i]).filter(([s]) => s.type === k).map(([s, i]) => {
+    const added = have.has(s.title.toLowerCase());
+    return `<div class="starter"><div><b>${esc(s.title)}</b>${s.body ? `<span class="d">${esc(s.body)}</span>` : ''}${s.source ? `<span class="d xs">${esc(s.source)}</span>` : ''}</div>
+      <button class="btn ${added ? 'quiet' : ''}" data-act="starter-add" data-i="${i}" ${added ? 'disabled' : ''} aria-label="${added ? 'Added' : 'Add'}: ${esc(s.title)}">${added ? 'Added' : 'Add'}</button></div>`;
+  }).join('')}`).join('')}
+  </div>`, true);
+}
+
+/* ---------- Help me choose ---------- */
+let quiz = null;
+const QUIZ_STEPS = ['feel', 'strength', 'need', 'time', 'who'];
+function startQuiz(entryId) {
+  runner = null; kd = null;
+  quiz = { step: 0, q: null, words: [], i: null, need: null, time: null, alone: null, entryId: entryId || null };
+  const e = entryId ? state.entries.find(x => x.id === entryId) : null;
+  if (e && isCheckin(e)) { Object.assign(quiz, feelAsk(e)); quiz.from = e; quiz.locked = true; quiz.step = 2; }
+  drawQuiz();
+}
+function drawQuiz() {
+  const z = quiz, step = QUIZ_STEPS[z.step];
+  const opt = (act, v, label, d, on) => `<button class="opt" data-act="${act}" data-v="${esc(v)}" aria-pressed="${!!on}">${label}${d ? `<span class="d">${d}</span>` : ''}</button>`;
+  let h = '', body = '';
+  if (step === 'feel') {
+    const recent = state.entries.filter(e => isCheckin(e) && daysSince(e.at) < 3 / 24).sort((a, b) => b.at.localeCompare(a.at))[0];
+    h = 'What are you feeling?';
+    body = `${recent ? `<div class="quiz-opts">${opt('qz-recent', recent.id, `Same as my last check-in`, esc(recent.feelings.map(f => f.w).join(', ')) + ' · ' + fmtTime(recent.at))}</div><p class="muted small" style="margin:16px 0 8px">Or pick one:</p>` : ''}
+      <div class="quiz-opts two">${QORDER.map(q => `<button class="opt quad-opt" data-act="qz-q" data-v="${q}" aria-pressed="${z.q === q}" style="--c:${QCOL[q]}"><b>${QUADS[q].short}</b><span class="d">${QUADS[q].name}</span></button>`).join('')}</div>
+      ${usualWords(6).length ? `<p class="muted small" style="margin:16px 0 8px">Or a word you use a lot:</p><div class="chips">${usualWords(6).map(f => `<button class="chip" data-act="qz-word" data-v="${esc(f.w)}" data-q="${f.q}"><i class="cdot" style="background:${QCOL[f.q]}" aria-hidden="true"></i>${esc(f.w)}</button>`).join('')}</div>` : ''}`;
+  } else if (step === 'strength') {
+    h = 'How strong is it?';
+    body = `<div class="quiz-opts">${STRENGTH.map((s, i) => opt('qz-i', i + 1, s[0].toUpperCase() + s.slice(1), '', z.i === i + 1)).join('')}</div>`;
+  } else if (step === 'need') {
+    h = 'What would help most?';
+    const order = unpleasant(z.q) ? ['calm', 'ground', 'comfort', 'connect', 'think', 'lift', 'rest', 'energy', 'savor'] : ['savor', 'energy', 'connect', 'rest', 'calm', 'lift', 'think', 'ground', 'comfort'];
+    body = `${z.from ? `<p class="muted">For <b>${esc(z.words.join(', '))}</b>, ${STRENGTH[z.i - 1]}.</p>` : ''}<div class="quiz-opts">${order.map(n => opt('qz-need', n, NEED[n], '', z.need === n)).join('')}${opt('qz-need', '', 'Not sure', '', false)}</div>`;
+  } else if (step === 'time') {
+    h = 'How much time do you have?';
+    body = `<div class="quiz-opts">${opt('qz-time', 1, 'About a minute', '', z.time === 1)}${opt('qz-time', 5, 'A few minutes', '', z.time === 5)}${opt('qz-time', 60, 'Fifteen minutes or more', '', z.time === 60)}</div>`;
+  } else if (step === 'who') {
+    h = 'Who\'s around?';
+    body = `<div class="quiz-opts">${opt('qz-who', 'alone', 'Just me', '', z.alone === true)}${opt('qz-who', 'people', 'Other people', 'Things you can do quietly, without anyone noticing', z.alone === false)}</div>`;
+  } else return drawQuizResults();
+  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="${z.step && !(z.locked && z.step === 2) ? 'qz-back' : 'close'}">${z.step && !(z.locked && z.step === 2) ? 'Back' : 'Cancel'}</button>
+    <div class="progress" aria-hidden="true">${QUIZ_STEPS.map((_, i) => `<i class="${i <= z.step ? 'on' : ''}"></i>`).join('')}</div><span class="step">Help me choose</span></div>
+    <h2>${h}</h2>${body}</div>`);
+}
+function drawQuizResults() {
+  const z = quiz;
+  const ranked = rankKit(z);
+  const skills = ranked.filter(x => x.it.type === 'skill');
+  const words = ranked.filter(x => x.it.type !== 'skill');
+  const mineCount = state.kit.length;
+  const feelLine = z.words.length ? z.words.join(', ') : QUADS[z.q].short.toLowerCase();
+  openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="qz-back">Back</button><span class="step">Help me choose</span><button class="btn quiet" data-act="close">Done</button></div>
+    <h2>Try one of these</h2>
+    <p class="muted">For ${esc(feelLine)}, ${STRENGTH[(z.i || 3) - 1]}${z.need ? `, to ${NEED[z.need].toLowerCase()}` : ''}${z.time ? `, ${z.time === 1 ? 'in a minute' : z.time === 5 ? 'in a few minutes' : 'with some time'}` : ''}${z.alone === false ? ', with people around' : ''}.</p>
+    ${skills.length ? skills.slice(0, 3).map(x => kitRow(x.it, z.entryId, x.why)).join('') : `<p class="muted">Nothing fits all of that. Try a different need or more time.</p>`}
+    ${words.length ? `<h3>Something to hold on to</h3>${words.slice(0, 2).map(x => quoteCard(x.it, z.entryId, x.why)).join('')}` : ''}
+    ${skills.length > 3 ? `<details class="more"><summary>More ideas (${Math.min(skills.length - 3, 6)})</summary>${skills.slice(3, 9).map(x => kitRow(x.it, z.entryId, x.why)).join('')}</details>` : ''}
+    ${mineCount < 3 ? `<p class="muted small" style="margin-top:16px">Your own skills from therapy show up first once you add them and tag them with feelings. <button class="btn quiet" data-act="kit-add">Add one</button></p>` : ''}
+    <div class="row" style="margin-top:16px"><button class="btn" data-act="quiz">Start over</button></div>
+    ${unpleasant(z.q) && (z.i || 0) >= 4 ? crisisLine() : ''}</div>`);
 }
 
 /* ---------- Journal ---------- */
-let jFilter = 'all', jSearch = '';
+let jFilter = 'all', jSearch = '', jView = 'entries';
+const jSeg = () => `<div class="seg jseg" role="group" aria-label="Show">${[['entries', 'Entries'], ['patterns', 'Patterns']].map(([v, l]) => `<button data-act="j-view" data-v="${v}" aria-pressed="${jView === v}" ${v === 'patterns' ? 'id="j-patterns"' : ''}>${l}</button>`).join('')}</div>`;
 function renderJournal() {
+  if (jView === 'patterns') return renderPatterns();
   let list = state.entries.slice().sort((a, b) => b.at.localeCompare(a.at));
   if (jFilter !== 'all') list = list.filter(e => e.feelings.some(f => f.q === jFilter));
   if (jSearch) { const s = jSearch.toLowerCase(); list = list.filter(e => JSON.stringify([e.feelings.map(f => f.w), e.tags, e.note, e.body]).toLowerCase().includes(s)); }
-  let html = `<div class="chips" style="margin-bottom:12px"><button class="chip" data-act="j-filter" data-f="all" aria-pressed="${jFilter === 'all'}">All</button>${QORDER.map(q => `<button class="chip" data-act="j-filter" data-f="${q}" aria-pressed="${jFilter === q}">${QUADS[q].short}</button>`).join('')}</div>
+  let html = `${jSeg()}<div class="chips" style="margin-bottom:12px"><button class="chip" data-act="j-filter" data-f="all" aria-pressed="${jFilter === 'all'}">All</button>${QORDER.map(q => `<button class="chip" data-act="j-filter" data-f="${q}" aria-pressed="${jFilter === q}">${QUADS[q].short}</button>`).join('')}</div>
   <label class="sr" for="jsearch">Search</label><input id="jsearch" type="text" placeholder="Search words, tags and notes" value="${esc(jSearch)}" data-act-input="j-search">`;
   if (!state.entries.length) html += `<div class="empty" style="margin-top:16px">Your check-ins will show up here, newest first.</div>`;
   else if (!list.length) html += `<p class="muted" style="margin-top:16px">Nothing matches.</p>`;
@@ -596,7 +826,7 @@ function renderJournal() {
 }
 function openEntry(id) {
   const e = state.entries.find(x => x.id === id); if (!e) return;
-  const tool = e.tool && [...TOOLS, ...state.customTools].find(t => t.id === e.tool.id);
+  const tool = e.tool && findItem(e.tool.id);
   const resL = { '-1': 'worse', '0': 'about the same', '1': 'a bit better', '2': 'better' };
   const sl = { short: 'Short sleep', ok: 'OK sleep', good: 'Good sleep' };
   const eid = esc(e.id);
@@ -604,7 +834,7 @@ function openEntry(id) {
   if (!isCheckin(e)) {
     // A note written in a tool: only the note can change.
     openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">${when}</span></div>
-      <h2>Note from ${esc(e.toolName || (tool && tool.name) || 'a tool')}</h2>
+      <h2>Note from ${esc(e.toolName || (tool && tool.title) || 'a tool')}</h2>
       ${tool ? `<p class="muted">Felt ${resL[e.tool.result] || ''} after.</p>` : ''}
       <label class="lbl" for="en-note">Note</label><textarea id="en-note" data-id="${eid}">${esc(e.note)}</textarea>
       <div class="row" style="margin-top:12px"><button class="btn primary" data-act="en-save" data-id="${eid}">Save note</button></div>
@@ -617,9 +847,9 @@ function openEntry(id) {
     ${e.body.length ? `<p><b>Body:</b> ${e.body.map(b => (BODY.find(x => x[0] === b) || [b, b])[1].toLowerCase()).join(', ')}</p>` : ''}
     ${e.tags.length ? `<p><b>Tags:</b> ${e.tags.map(esc).join(', ')}</p>` : ''}
     ${e.sleep || e.moved ? `<p class="muted">${[sl[e.sleep], e.moved === 'yes' ? 'Moved today' : e.moved === 'no' ? 'Hadn\'t moved yet' : ''].filter(Boolean).join(' · ')}</p>` : ''}
-    ${tool ? `<p class="muted">Tried ${esc(tool.name)}: felt ${resL[e.tool.result] || ''} after.</p>` : ''}
+    ${tool ? `<p class="muted">Tried ${esc(tool.title)}: felt ${resL[e.tool.result] || ''} after.</p>` : ''}
     <h3>Note</h3>${e.note ? `<p class="entry-note">${esc(e.note)}</p>` : `<p class="muted">No note. Tap Edit to add one.</p>`}
-    <div class="row" style="margin-top:12px"><button class="btn" data-act="run-tool-pick" data-id="${eid}">Try a tool</button></div>
+    <div class="row" style="margin-top:12px"><button class="btn" data-act="run-tool-pick" data-id="${eid}">Help me choose a skill</button></div>
     <div style="margin-top:28px"><button class="btn danger" data-act="en-del" data-id="${eid}">Delete check-in</button></div></div>`);
 }
 
@@ -630,7 +860,7 @@ function renderPatterns() {
   const es = state.entries.filter(e => isCheckin(e) && new Date(e.at) >= since);
   const rangeSeg = `<div class="seg" role="group" aria-label="Range">${[[7, '7 days'], [30, '30 days'], [0, 'All']].map(([v, l]) => `<button data-act="p-range" data-v="${v}" aria-pressed="${pRange === v}">${l}</button>`).join('')}</div>`;
   if (es.length < 5) {
-    view.innerHTML = `${rangeSeg}<div class="empty" style="margin-top:16px">Patterns show up after about 5 check-ins in this range. You have ${es.length}.<br><br>Tags, sleep and movement make them sharper.</div>`;
+    view.innerHTML = `${jSeg()}${rangeSeg}<div class="empty" style="margin-top:16px">Patterns show up after about 5 check-ins in this range. You have ${es.length}.<br><br>Tags, sleep and movement make them sharper.</div>`;
     return;
   }
   const counts = { hu: 0, hp: 0, lu: 0, lp: 0 }; es.forEach(e => counts[domQ(e)]++);
@@ -675,15 +905,15 @@ function renderPatterns() {
   const used = state.toolUses.filter(u => new Date(u.at) >= since && u.result != null);
   const tc = {}; used.forEach(u => { tc[u.id] = tc[u.id] || { n: 0, h: 0 }; tc[u.id].n++; if (u.result > 0) tc[u.id].h++; });
   const tTop = Object.entries(tc).sort((a, b) => b[1].h / b[1].n - a[1].h / a[1].n || b[1].n - a[1].n).slice(0, 3);
-  const nm = id => ([...TOOLS, ...state.customTools].find(t => t.id === id) || { name: id }).name;
-  view.innerHTML = `${rangeSeg}
+  const nm = itemName;
+  view.innerHTML = `${jSeg()}${rangeSeg}
   <h2>The mix</h2><p class="muted small">${tot} check-ins. ${pct(U)}% leaned unpleasant, ${100 - pct(U)}% pleasant.</p>
   <div class="mixbar">${mix}</div><div class="legend">${QORDER.map(q => `<span><i style="background:${QCOL[q]}"></i>${QUADS[q].short} ${counts[q]}</span>`).join('')}</div>
   <h2>Every feeling, placed</h2><p class="muted small">Up is more energy, right is more pleasant. Bigger dots were stronger.</p>${scatter}
   <h2>By time of day</h2>${todHtml}
   <h2>What stands out</h2>${F.length ? F.map(f => `<div class="finding"><b>${esc(f[0])}</b><span class="muted">${esc(f[1])}</span></div>`).join('') : `<p class="muted">Nothing stands out yet. Tags, sleep and movement give Patterns more to compare.</p>`}
   <h2>Words you used most</h2><p>${wTop.map(([w, n]) => `${esc(w)} <span class="muted small">×${n}</span>`).join(' · ')}</p>
-  ${tTop.length ? `<h2>Tools that helped</h2>${tTop.map(([id, s]) => `<div class="finding"><b>${esc(nm(id))}</b><span class="muted">Helped ${s.h} of ${s.n} ${s.n === 1 ? 'try' : 'tries'}.</span></div>`).join('')}` : ''}
+  ${tTop.length ? `<h2>Skills that helped</h2>${tTop.map(([id, s]) => `<div class="finding"><b>${esc(nm(id))}</b><span class="muted">Helped ${s.h} of ${s.n} ${s.n === 1 ? 'try' : 'tries'}.</span></div>`).join('')}` : ''}
   <p class="muted xs" style="margin-top:20px">These are patterns in what you logged, not diagnoses. A few check-ins can swing them a lot.</p>`;
 }
 
@@ -695,9 +925,9 @@ function renderMore() {
   view.innerHTML = `
   <h2>Settings</h2>
   ${row('theme', 'Appearance', '', [['auto', 'Match phone'], ['light', 'Light'], ['dark', 'Dark']])}
-  ${row('mode', 'Check-in starts with', 'You can switch during any check-in', [['grid', 'Grid'], ['wheel', 'Wheel']])}
-  ${row('arabic', 'Arabic words', 'Shown under each feeling, with a button to hear them', [['sh', 'Shami'], ['fu', 'Fusha'], ['both', 'Both'], ['off', 'Off']])}
-  ${row('faith', 'Faith tools', 'Prayer and scripture in Tools', [[true, 'Show'], [false, 'Hide']].map(([v, l]) => [String(v), l]))}
+  ${row('mode', 'Check-in starts with', 'You can switch during any check-in', [['field', 'Words'], ['wheel', 'Wheel']])}
+  ${row('arabic', 'Arabic words', 'Show Arabic on the feeling words, with a button to hear them', [['off', 'Off'], ['sh', 'Shami'], ['fu', 'Fusha'], ['both', 'Both']])}
+  ${row('faith', 'Faith skills', 'Prayer and scripture in the Toolkit', [[true, 'Show'], [false, 'Hide']].map(([v, l]) => [String(v), l]))}
   <h2>Tags</h2><p class="muted small">Tap a tag to hide it. Add new ones during a check-in.</p>
   ${Object.keys(TAG_GROUPS).map(g => `<div class="chips" style="margin-bottom:10px">${[...TAG_GROUPS[g], ...state.customTags[g]].map(t => `<button class="chip" data-act="tag-hide" data-k="${g}:${esc(t)}" aria-pressed="${!state.hiddenTags.includes(g + ':' + t)}">${esc(t)}</button>`).join('')}</div>`).join('')}
   <h2>Reminders</h2>
@@ -706,7 +936,7 @@ function renderMore() {
   <div style="margin-top:10px"><button class="btn" data-act="ics" ${s.reminders.length ? '' : 'disabled'}>Add to calendar</button></div>
   <h2>Your data</h2>
   <p class="muted small">Everything stays on this phone. Save a backup now and then; it's the only copy.${isInstalled() ? '' : ' Adding Undertow to your Home Screen also stops the browser from clearing it.'}</p>
-  <button class="linkrow" data-act="backup">Save a backup<span class="d">${state.entries.length} entries · last backup ${state.lastBackupAt ? fmtDay(state.lastBackupAt) : 'never'}</span></button>
+  <button class="linkrow" data-act="backup">Save a backup<span class="d">${state.entries.length} entries, ${state.kit.length} toolkit item${state.kit.length === 1 ? '' : 's'} · last backup ${state.lastBackupAt ? fmtDay(state.lastBackupAt) : 'never'}</span></button>
   <button class="linkrow" data-act="restore">Restore from a backup<span class="d">Adds check-ins you don't already have</span></button>
   <button class="linkrow" data-act="csv">Export a spreadsheet (CSV)</button>
   <input type="file" id="restore-file" accept=".json,application/json" hidden>
@@ -780,12 +1010,21 @@ function cleanEntry(e) {
   if (e.toolOnly) { out.toolOnly = true; out.toolName = typeof e.toolName === 'string' ? e.toolName : ''; }
   return out;
 }
+/* Accept only well-formed toolkit items from a backup file. */
+function cleanKit(t) {
+  if (!t || typeof t.id !== 'string' || !t.id || typeof t.title !== 'string' || !t.title.trim() || !TYPE[t.type]) return null;
+  const strs = a => Array.isArray(a) ? a.filter(x => typeof x === 'string') : [];
+  return { id: t.id, type: t.type, title: t.title.slice(0, 300), body: typeof t.body === 'string' ? t.body : '', steps: strs(t.steps),
+    q: strs(t.q).filter(q => QUADS[q]), needs: strs(t.needs).filter(n => NEED[n]), tags: strs(t.tags).slice(0, 20), min: Math.max(1, Math.min(60, +t.min || 5)),
+    anywhere: t.anywhere !== false, source: typeof t.source === 'string' ? t.source : '', fav: !!t.fav, at: isNaN(Date.parse(t.at)) ? new Date().toISOString() : t.at };
+}
 function restore(file) {
   const r = new FileReader();
   r.onload = () => {
     try {
       const d = JSON.parse(r.result);
       if (!d || !Array.isArray(d.entries)) throw new Error('not a backup');
+      migrate(d);
       const have = new Set(state.entries.map(e => e.id));
       const clean = d.entries.map(cleanEntry);
       const skipped = clean.filter(e => !e).length;
@@ -793,11 +1032,14 @@ function restore(file) {
       state.entries.push(...add);
       const uh = new Set(state.toolUses.map(u => u.at + u.id));
       state.toolUses.push(...(Array.isArray(d.toolUses) ? d.toolUses : []).filter(u => u && typeof u.id === 'string' && !isNaN(Date.parse(u.at)) && !uh.has(u.at + u.id)));
-      const th = new Set(state.customTools.map(t => t.id));
-      state.customTools.push(...(Array.isArray(d.customTools) ? d.customTools : []).filter(t => t && typeof t.id === 'string' && typeof t.name === 'string' && Array.isArray(t.steps) && Array.isArray(t.q) && !th.has(t.id)));
+      const kh = new Set(state.kit.map(t => t.id));
+      const kitIn = [...(Array.isArray(d.kit) ? d.kit : []).map(cleanKit), ...(Array.isArray(d.customTools) ? d.customTools : []).filter(validCustom).map(customToKit)];
+      const kitAdd = kitIn.filter(t => t && !kh.has(t.id) && kh.add(t.id));
+      state.kit.push(...kitAdd);
+      if (Array.isArray(d.hiddenBuiltIns)) state.hiddenBuiltIns = [...new Set([...state.hiddenBuiltIns, ...d.hiddenBuiltIns.filter(x => typeof x === 'string')])];
       for (const g of Object.keys(TAG_GROUPS)) state.customTags[g] = [...new Set([...state.customTags[g], ...(((d.customTags || {})[g]) || []).filter(t => typeof t === 'string')])];
       readOk = true; save(); render();
-      const msg = `Restored ${add.length} entr${add.length === 1 ? 'y' : 'ies'}${skipped ? `, skipped ${skipped} that couldn't be read` : ''}.`;
+      const msg = `Restored ${add.length} entr${add.length === 1 ? 'y' : 'ies'}${kitAdd.length ? ` and ${kitAdd.length} toolkit item${kitAdd.length === 1 ? '' : 's'}` : ''}${skipped ? `, skipped ${skipped} that couldn't be read` : ''}.`;
       if (d.settings && typeof d.settings === 'object') {
         toast(msg, 'Use its settings', () => {
           state.settings = { ...state.settings, ...d.settings };
@@ -812,14 +1054,16 @@ function restore(file) {
 function helpSheet() {
   openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">Help</span></div>
   <h2>How Undertow works</h2>
-  <p>Check in whenever something shifts. Pick up to three feelings, how strong each is, where you feel it, and what's going on. After a check-in you can try a tool and say whether it helped.</p>
-  <h3>Grid and wheel</h3>
-  <p>The <b>grid</b> sorts feelings by energy (up and down) and pleasantness (left and right), the same two-axis idea researchers use for mood. The word list and layout are Undertow's own.</p>
+  <p>Check in whenever something shifts. Pick up to three feelings and how strong each is, then save. Where you feel it and what's going on are optional. After a check-in, your toolkit suggests something to try, and you say whether it helped.</p>
+  <h3>Words and wheel</h3>
+  <p>The <b>words</b> are a field of 144 feelings you can drag around in. Up is more energy, right is more pleasant, the mildest feelings sit in the middle and the strongest in the corners. Tap a word to see what it means. The four buttons above jump to each area, and search finds a word by name or by what it means. The word list, definitions and layout are Undertow's own.</p>
   <p>The <b>wheel</b> is drawn from Robert Plutchik's 1980 model of emotion: eight basic emotions, each at three strengths, with blends between neighbours (joy and trust make love). The strongest sit at the center. The drawing and colors here are Undertow's own.</p>
+  <h3>Toolkit</h3>
+  <p>Keep the skills, affirmations, reminders and notes from therapy in your own words. Tag each with the feelings it helps with (like anxious or lonely), what it helps you do, and how long it takes. <b>Help me choose</b> asks what you're feeling, how strong it is, what you need, how much time you have and who's around, then suggests your own items first, ranked by how often they've helped.</p>
   <h3>Arabic</h3>
-  <p>Grid words show Shami (Levantine) by default, with Fusha in settings. Wheel words show the Fusha noun. The ▸ button reads a word aloud if your phone has an Arabic voice. These translations are a first draft; check them with a speaker.</p>
+  <p>Arabic is off unless you turn it on in More. Field words can show Shami (Levantine), Fusha or both. Wheel words show the Fusha noun. The ▸ button reads a word aloud if your phone has an Arabic voice. These translations are a first draft; check them with a speaker.</p>
   <h3>Patterns</h3>
-  <p>After about five check-ins, Patterns compares your feelings across times of day, weekdays, tags, sleep and movement, and shows which tools have helped. They're patterns in what you logged, not diagnoses.</p>
+  <p>After about five check-ins, Patterns compares your feelings across times of day, weekdays, tags, sleep and movement, and shows which skills have helped. It lives in Journal. They're patterns in what you logged, not diagnoses.</p>
   <h3>Privacy</h3>
   <p>Everything stays on this device: no account, no server, no tracking. A second copy is kept in the browser's database in case the first can't be read. Save a backup file in More now and then; Undertow reminds you every two weeks.</p>
   <p>Add Undertow to your Home Screen (in Safari: Share, then Add to Home Screen). In a normal Safari tab, Safari can clear a site's saved data after 7 days without a visit; an app on the Home Screen keeps it.</p>
@@ -832,12 +1076,11 @@ function helpSheet() {
 /* ---------- Tour ---------- */
 const TOUR = [
   { sel: null, tab: 'today', h: 'Welcome to Undertow', b: 'A quiet place to notice what\'s moving under the surface. Here\'s a quick look around.' },
-  { sel: '#t-checkin', tab: 'today', h: 'Check in', b: 'Pick up to three feelings on the grid or the wheel, then where you feel it and what\'s going on. About 20 seconds.' },
+  { sel: '#t-checkin', tab: 'today', h: 'Check in', b: 'Drag around the field of feeling words, tap one to see what it means, and save. Details are optional. About 10 seconds.' },
   { sel: '#t-week', tab: 'today', h: 'Your week', b: 'Each day takes the color of the feeling you logged most. No streaks: a blank day is just a blank day.' },
-  { sel: '[data-tab="journal"]', tab: 'today', h: 'Journal', b: 'Every check-in, newest first. Filter by color or search your notes and tags.' },
-  { sel: '[data-tab="patterns"]', tab: 'today', h: 'Patterns', b: 'After about five check-ins: what times, days, people and places tend to come with harder or easier feelings.' },
-  { sel: '[data-tab="tools"]', tab: 'today', h: 'Tools', b: 'Breathing, grounding, movement and more. After each one you say if it helped, so the useful ones rise to the top. Add your own too.' },
-  { sel: '[data-tab="more"]', tab: 'today', h: 'More', b: 'Arabic words, the faith tools, tags, calendar reminders and backups.' },
+  { sel: '[data-tab="journal"]', tab: 'today', h: 'Journal', b: 'Every check-in, newest first. Switch to Patterns to see what times, days, people and places come with harder or easier feelings.' },
+  { sel: '[data-tab="toolkit"]', tab: 'today', h: 'Toolkit', b: 'Your skills, affirmations and notes from therapy, tagged with what they help. Help me choose asks a few questions and suggests one.' },
+  { sel: '[data-tab="more"]', tab: 'today', h: 'More', b: 'Arabic words, faith skills, tags, calendar reminders and backups.' },
   { sel: '[data-tab="more"]', tab: 'today', lim: true, h: 'One thing to know', b: 'Your check-ins live only on this phone. There\'s no sync yet, so save a backup in More now and then.' },
 ];
 let tourI = 0;
@@ -867,6 +1110,8 @@ function endTour() {
 
 /* ---------- events ---------- */
 let delArmed = null;
+const toggle = (arr, v) => { const i = arr.indexOf(v); if (i >= 0) arr.splice(i, 1); else arr.push(v); };
+function quizNext() { quiz.step++; drawQuiz(); }
 document.addEventListener('click', ev => {
   const b = ev.target.closest('[data-act], [data-tab]'); if (!b) return;
   if (b.dataset.tab) return go(b.dataset.tab);
@@ -882,16 +1127,24 @@ document.addEventListener('click', ev => {
     case 'ck-step': ck.step = +d.step; return drawCheckin();
     case 'en-edit': return editCheckin(d.id);
     case 'ck-mode': ck.mode = d.m; return drawCheckin(true);
-    case 'ck-quad': ck.quad = d.q || null; return drawCheckin(true);
-    case 'ck-word': { const w = GRIDMAP[d.q][d.rc]; addFeeling({ ...w, src: 'grid' }); return drawCheckin(true); }
+    case 'ck-zone': return placeField(d.q, !matchMedia('(prefers-reduced-motion: reduce)').matches);
+    case 'ck-fword': addFeeling(fieldFeeling(d.w)); return drawCheckin(true);
     case 'ck-wheel': { const p = +d.p, l = +d.l; ck.petal = p; addFeeling(wheelWord(p, l)); return drawCheckin(true); }
-    case 'ck-wheelword': addFeeling(JSON.parse(d.json)); return drawCheckin(true);
-    case 'ck-unpick': ck.feelings.splice(+d.i, 1); return drawCheckin(true);
+    case 'ck-pick': {
+      const fromSearch = b.classList.contains('res');
+      addFeeling(JSON.parse(d.json));
+      if (fromSearch && isPicked(JSON.parse(d.json).w)) ck.search = '';
+      drawCheckin(true);
+      if (fromSearch) { const c = $('#ck-picked'); if (c) c.scrollIntoView({ block: 'nearest' }); }
+      return;
+    }
+    case 'ck-focus': ck.focus = d.w; return drawCheckin(true);
+    case 'ck-unpick': ck.feelings.splice(+d.i, 1); ck.focus = (ck.feelings[ck.feelings.length - 1] || {}).w || null; return drawCheckin(true);
     case 'say': { const f = ck.feelings[+d.i]; return say(f.src === 'wheel' ? f.fu : (state.settings.arabic === 'fu' ? f.fu : f.sh)); }
-    case 'ck-next': if (ck.step === 0 && !ck.feelings.length) return; ck.step++; return drawCheckin();
-    case 'ck-back': ck.step--; return drawCheckin();
-    case 'ck-body': { const i = ck.body.indexOf(d.b); if (i >= 0) ck.body.splice(i, 1); else ck.body.push(d.b); return drawCheckin(true); }
-    case 'ck-tag': { const i = ck.tags.indexOf(d.t); if (i >= 0) ck.tags.splice(i, 1); else ck.tags.push(d.t); return drawCheckin(true); }
+    case 'ck-next': if (!ck.feelings.length) return; ck.step = 1; return drawCheckin();
+    case 'ck-back': ck.step = 0; return drawCheckin();
+    case 'ck-body': toggle(ck.body, d.b); return drawCheckin(true);
+    case 'ck-tag': toggle(ck.tags, d.t); return drawCheckin(true);
     case 'ck-addtag': {
       const t = (prompt('New tag') || '').trim().toLowerCase().slice(0, 30); if (!t) return;
       if (!tagsFor(d.g).includes(t)) state.customTags[d.g].push(t);
@@ -908,29 +1161,48 @@ document.addEventListener('click', ev => {
       const [gone] = state.entries.splice(i, 1); save(); closeSheet();
       return toast(isCheckin(gone) ? 'Check-in deleted.' : 'Note deleted.', 'Undo', () => { state.entries.push(gone); save(); render(); });
     }
-    case 'run-tool-pick': {
-      const e = state.entries.find(x => x.id === d.id); if (!e) return; const q = domQ(e);
-      openSheet(`<div class="sheet-in"><div class="sheet-top"><button class="btn quiet" data-act="close">Close</button><span class="step">Pick a tool</span></div><h2>Try a tool</h2>${suggestTools(q).map(t => toolRow(t, e.id)).join('')}</div>`);
-      return;
-    }
+    case 'run-tool-pick': return startQuiz(d.id);
     case 'run-tool': return runTool(d.id, d.entry);
     case 'breath': b.textContent = breathT ? 'Start' : 'Pause'; return breath();
     case 'tool-res': runner.result = +d.v; { const j = $('#tj'); if (j) runner.journal = j.value; } return drawRunner();
     case 'tool-save': return saveTool();
-    case 'tool-filter': toolFilter = d.f; return render();
-    case 'add-tool': return addToolSheet();
-    case 'nt-q': b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') !== 'true'); return;
-    case 'nt-save': {
-      const name = $('#nt-name').value.trim(); const steps = $('#nt-steps').value.split('\n').map(s => s.trim()).filter(Boolean);
-      const q = [...sheet.querySelectorAll('[data-act="nt-q"][aria-pressed="true"]')].map(x => x.dataset.q);
-      if (!name) return toast('Give it a name.');
-      state.customTools.push({ id: 'c-' + uid(), name, steps: steps.length ? steps : [name], q: q.length ? q : QORDER.slice(), min: 5, kind: 'Your tool' });
-      save(); closeSheet(); return toast('Tool added.');
+    /* Toolkit */
+    case 'kit-type': kitType = d.f; return render();
+    case 'kit-add': return editKit(null);
+    case 'kit-edit': return editKit(d.id);
+    case 'kit-starters': runner = null; return startersSheet();
+    case 'starter-add': {
+      const s = STARTERS[+d.i];
+      state.kit.push({ id: 'k-' + uid(), type: s.type, title: s.title, body: s.body || '', steps: [...(s.steps || [])], q: [...(s.q || [])], needs: [...(s.needs || [])], tags: [], min: s.min || 1, anywhere: s.anywhere !== false, source: s.source || '', fav: false, at: new Date().toISOString() });
+      save(); startersSheet(); return toast('Added. Edit it any time to make it yours.');
     }
-    case 'del-tool': {
+    case 'kit-hide': state.hiddenBuiltIns.push(d.id); save(); runner = null; closeSheet(); return toast('Hidden. You can bring it back at the bottom of the Toolkit.');
+    case 'kit-unhide': state.hiddenBuiltIns = []; save(); return render();
+    case 'kd-type': kd.type = d.v; return drawKitEdit(true);
+    case 'kd-q': toggle(kd.q, d.v); return drawKitEdit(true);
+    case 'kd-need': toggle(kd.needs, d.v); return drawKitEdit(true);
+    case 'kd-min': kd.min = +d.v; return drawKitEdit(true);
+    case 'kd-any': kd.anywhere = d.v === 'yes'; return drawKitEdit(true);
+    case 'kd-fav': kd.fav = !kd.fav; return drawKitEdit(true);
+    case 'kd-save': return saveKit();
+    case 'kd-del': {
       if (delArmed !== d.id) { delArmed = d.id; b.textContent = 'Tap again to delete'; setTimeout(() => { delArmed = null; }, 4000); return; }
-      state.customTools = state.customTools.filter(t => t.id !== d.id); save(); closeSheet(); return toast('Tool deleted.');
+      const i = state.kit.findIndex(x => x.id === d.id); if (i < 0) return;
+      const [gone] = state.kit.splice(i, 1); save(); kd = null; closeSheet();
+      return toast('Deleted.', 'Undo', () => { state.kit.push(gone); save(); render(); });
     }
+    /* Help me choose */
+    case 'quiz': return startQuiz(d.id);
+    case 'qz-back': quiz.step--; if (quiz.step < 2 && quiz.from) { quiz.from = null; quiz.step = 0; } return drawQuiz();
+    case 'qz-recent': { const e = state.entries.find(x => x.id === d.v); Object.assign(quiz, feelAsk(e)); quiz.from = e; quiz.entryId = e.id; quiz.step = 2; return drawQuiz(); }
+    case 'qz-q': quiz.q = d.v; quiz.words = []; quiz.from = null; return quizNext();
+    case 'qz-word': quiz.q = d.q; quiz.words = [d.v]; quiz.from = null; return quizNext();
+    case 'qz-i': quiz.i = +d.v; return quizNext();
+    case 'qz-need': quiz.need = d.v || null; return quizNext();
+    case 'qz-time': quiz.time = +d.v; return quizNext();
+    case 'qz-who': quiz.alone = d.v === 'alone'; return quizNext();
+    /* Journal and the rest */
+    case 'j-view': jView = d.v; return render();
     case 'j-filter': jFilter = d.f; return render();
     case 'p-range': pRange = +d.v; return render();
     case 'tag-hide': { const k = d.k; state.hiddenTags = state.hiddenTags.includes(k) ? state.hiddenTags.filter(x => x !== k) : [...state.hiddenTags, k]; save(); return render(); }
@@ -957,7 +1229,7 @@ document.addEventListener('keydown', ev => {
   if (ev.key === 'Tab') {
     const box = $('#guard') || (!$('#tour').hidden && $('#tour .tip')) || (!sheet.hidden && sheet);
     if (!box) return;
-    const items = [...box.querySelectorAll('button:not([disabled]), [href], input, textarea, select, [tabindex="0"]')].filter(x => !x.closest('[inert]') && x.getClientRects().length > 0);
+    const items = [...box.querySelectorAll('button:not([disabled]), [href], input, textarea, select, summary, [tabindex="0"]')].filter(x => !x.closest('[inert]') && x.getClientRects().length > 0);
     if (!items.length) return;
     const first = items[0], last = items[items.length - 1];
     if (ev.shiftKey && (document.activeElement === first || !box.contains(document.activeElement))) { ev.preventDefault(); last.focus(); }
@@ -967,10 +1239,19 @@ document.addEventListener('keydown', ev => {
 document.addEventListener('input', ev => {
   const el = ev.target, a = el.dataset.actInput; if (!a) return;
   if (a === 'ck-int') { ck.feelings[+el.dataset.i].i = +el.value; const word = STRENGTH[el.value - 1]; el.setAttribute('aria-valuetext', word); el.nextElementSibling.querySelector('.now').textContent = word; }
+  if (a === 'ck-search') {
+    // Update the results in place so the keyboard stays up.
+    ck.search = el.value;
+    $('#ck-results').innerHTML = searchResults();
+    $('#ck-browse').hidden = !!ck.search.trim();
+    if (!ck.search.trim()) placeField();
+  }
   if (a === 'ck-note') ck.note = el.value;
   if (a === 'ck-when') ck.when = el.value || null;
   if (a === 'tool-journal') runner.journal = el.value;
+  if (a === 'kd') kd[el.dataset.k] = el.value;
   if (a === 'j-search') { jSearch = el.value; const pos = el.selectionStart; renderJournal(); const n = $('#jsearch'); n.focus(); n.setSelectionRange(pos, pos); }
+  if (a === 'k-search') { kitSearch = el.value; const pos = el.selectionStart; renderToolkit(); const n = $('#ksearch'); n.focus(); n.setSelectionRange(pos, pos); }
   if (a === 'rem') { state.settings.reminders[+el.dataset.i] = el.value; save(); }
 });
 document.addEventListener('change', ev => {

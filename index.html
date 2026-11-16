@@ -28,12 +28,11 @@
   <nav class="tabs" aria-label="Sections">
     <button data-tab="today" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 15c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 3 2M3 19c2.5 0 2.5-2 5-2s2.5 2 5 2 2.5-2 5-2 2.5 2 3 2M12 3v6M8.5 6.5 12 10l3.5-3.5"/></svg><span>Today</span></button>
     <button data-tab="journal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3zM5 17a3 3 0 0 1 3-3h11M9 8h6"/></svg><span>Journal</span></button>
-    <button data-tab="patterns"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V4M4 20h16M8 16l3-4 3 2 5-7"/></svg><span>Patterns</span></button>
-    <button data-tab="tools"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21c4.4 0 8-3.1 8-7 0-4.5-4-6-4-10-2 1-4 3-4 6-1-1-1.5-2-1.5-3C7 9 4 11 4 14c0 3.9 3.6 7 8 7z"/></svg><span>Tools</span></button>
+    <button data-tab="toolkit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h16v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1zM9 9V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3M4 13h16M11 13v2h2v-2"/></svg><span>Toolkit</span></button>
     <button data-tab="more"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span>More</span></button>
   </nav>
 </div>
-<div id="sheet" class="sheet" hidden></div>
+<div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="tour" hidden></div>
 <script src="data.js"></script>
