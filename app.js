@@ -1,7 +1,7 @@
 /* Undertow 1.2 — personal feelings check-in app. Data stays on this device. */
 (() => {
 'use strict';
-const VERSION = '1.2.1';
+const VERSION = '1.3';
 const VERSION_DATE = 'Nov 15, 2026';
 const KEY = 'undertow.v1';
 const $ = (s, el = document) => el.querySelector(s);
@@ -153,6 +153,79 @@ const ALL_WORDS = (() => {
   return out;
 })();
 const defOf = w => (FMAP[w] && FMAP[w].def) || WHEEL_DEFS[w] || '';
+
+/* ---------- feeling shapes ---------- */
+/* Each word's shape, drawn once at startup in a 92-pixel box (the size of a word circle).
+   The family sets the look; a seed from the word varies it; stronger words (d) push it further. */
+const SHAPE_FAMILY = {};
+Object.entries(SHAPE_FAMILIES).forEach(([f, ws]) => ws.forEach(w => { SHAPE_FAMILY[w] = f; }));
+const SHAPE_ID = {};
+function seeded(word) { let h = 2166136261; for (const ch of word) h = Math.imul(h ^ ch.charCodeAt(0), 16777619); return () => ((h = Math.imul(h ^ (h >>> 15), 2246822507) ^ Math.imul(h ^ (h >>> 13), 3266489909)) >>> 0) / 4294967296; }
+function shapePoints(word, d) {
+  const fam = SHAPE_FAMILY[word] || 'soft', rnd = seeded(word), k = 0.7 + 0.03 * (d || 0);
+  const N = 96, pts = [], TAU = Math.PI * 2;
+  const rot = rnd() * TAU;
+  const jit = Array.from({ length: 24 }, () => rnd() * 2 - 1);
+  const noise = t => { const x = (t / TAU) * 24, i = Math.floor(x), f = x - i, a = jit[i % 24], b = jit[(i + 1) % 24]; return a + (b - a) * (f * f * (3 - 2 * f)); };
+  for (let i = 0; i < N; i++) {
+    const t = i / N * TAU;
+    let x, y, r = 1;
+    switch (fam) {
+      case 'spiky': { const n = 9 + Math.floor(rnd() * 0) + Math.round(3 * k), tri = 1 - Math.abs(((t * n + rot) / TAU % 1) * 2 - 1); r = 1 + 0.42 * k * Math.pow(tri, 2.2) + 0.05 * noise(t); break; }
+      case 'jagged': { const n = 15, tri = 1 - Math.abs(((t * n + rot) / TAU % 1) * 2 - 1); r = 1 + 0.16 * k * tri + 0.04 * noise(t); break; }
+      case 'shaky': r = 1 + 0.075 * k * Math.sin(t * 11 + rot) + 0.05 * k * Math.sin(t * 17 + rot * 2) + 0.06 * noise(t); break;
+      case 'burst': { const n = 7 + Math.round(rnd() * 2), w = Math.pow(Math.abs(Math.cos((t * n + rot) / 2)), 1.6); r = 1 + 0.34 * k * w; break; }
+      case 'flower': { const n = 5 + Math.round(rnd() * 2); r = 1 + 0.17 * k * Math.abs(Math.sin((t * n + rot) / 2)) * 1.6 - 0.1; break; }
+      case 'swirl': r = 1 + 0.16 * k * Math.sin(t * 3 + rot) * (0.6 + 0.4 * Math.sin(t)) + 0.04 * noise(t); break;
+      case 'soft': r = 1 + 0.07 * Math.sin(t * 4 + rot) + 0.05 * noise(t); break;
+      case 'round': r = 1 + 0.012 * noise(t); break;
+      case 'hollow': r = 1 + 0.015 * noise(t); break;
+      case 'shrunk': r = 0.8 + 0.08 * noise(t) + 0.05 * Math.sin(t * 2 + rot); break;
+      case 'cloud': { const lob = Math.abs(Math.sin((t * 5 + rot * 0.3) / 2)); r = 1 + 0.18 * lob + 0.03 * noise(t); break; }
+    }
+    if (fam === 'heart') {
+      x = 16 * Math.pow(Math.sin(t), 3); y = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
+      const s = 1 + 0.03 * noise(t); x *= s; y *= s;
+    } else if (fam === 'drop') {
+      // a teardrop, point up, rounder and heavier for stronger sadness
+      x = Math.sin(t) * Math.pow(Math.sin(t / 2), 0.7 + 0.3 * k) * 1.12; y = -Math.cos(t) * (1.05 + 0.1 * k);
+      const s = 1 + 0.03 * noise(t); x *= s; y *= s;
+    } else if (fam === 'rising') {
+      // a rounded shape that narrows and lifts toward the top
+      x = Math.sin(t) * (0.82 + 0.18 * Math.cos(t) * -1 * 0 + 0.16 * (1 + Math.cos(t)) / 2); y = -Math.cos(t) * 1.08;
+      const lift = Math.pow(Math.max(0, Math.cos(t)), 3) * 0.22 * k; y -= lift; x *= 1.12 - 0.3 * Math.pow(Math.max(0, Math.cos(t)), 2) * k;
+    } else {
+      x = Math.cos(t) * r; y = Math.sin(t) * r;
+      if (fam === 'flat') { y *= 0.66 - 0.08 * k; x *= 1.04; if (y > 0) x *= 1 + 0.08 * y; y += 0.04 * noise(t * 2); }
+      if (fam === 'cloud') { y *= 0.86; if (y > 0.42) y = 0.42 + (y - 0.42) * 0.25; }
+    }
+    pts.push([x, y]);
+  }
+  // fit the 92-pixel box with a 1-pixel margin; small shapes keep their smallness
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  pts.forEach(([x, y]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); });
+  const fit = 90 / Math.max(x1 - x0, y1 - y0) * (fam === 'shrunk' ? 0.82 : 1);
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  return pts.map(([x, y]) => [46 + (x - cx) * fit, 46 + (y - cy) * fit]);
+}
+const pathOf = pts => 'M' + pts.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z';
+/* One stylesheet rule and one SVG path per word, so each redraw only refers to them. */
+function installShapes() {
+  const rules = [], defs = [];
+  FIELD.flat().forEach((w, i) => {
+    const p = pathOf(shapePoints(w, FMAP[w].d));
+    const hollow = false, inner = '';
+    SHAPE_ID[w] = i;
+    rules.push(`.shp-${i}{clip-path:path(${hollow ? 'evenodd,' : ''}'${p}${inner}')}`);
+    defs.push(`<path id="shp-${i}" d="${p}${inner}" ${hollow ? 'fill-rule="evenodd"' : ''}/>`);
+  });
+  const st = document.createElement('style'); st.textContent = rules.join('\n'); document.head.appendChild(st);
+  const sv = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  sv.setAttribute('aria-hidden', 'true'); sv.setAttribute('width', '0'); sv.setAttribute('height', '0'); sv.style.position = 'absolute';
+  sv.innerHTML = `<defs>${defs.join('')}</defs>`; document.body.appendChild(sv);
+}
+installShapes();
+const shapeIcon = (w, col) => SHAPE_ID[w] != null ? `<svg class="shape-icon" viewBox="0 0 92 92" aria-hidden="true"><use href="#shp-${SHAPE_ID[w]}" style="fill:${col}"/></svg>` : '';
 
 /* ---------- tabs ---------- */
 let tab = 'today';
@@ -416,7 +489,8 @@ function stepFeel() {
     FIELD.forEach(row => row.forEach(w => {
       const f = FMAP[w];
       const a = arOf({ ...f, src: 'grid' });
-      cells += `<button class="fw${w.length > 10 ? ' long' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:var(--v-${f.q});--k:${Math.round(45 + f.d * 5.5)}%">${esc(w)}${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
+      const fam = SHAPE_FAMILY[w], tight = ['drop', 'heart'].includes(fam) && w.length > 8;
+      cells += `<button class="fw shp-${SHAPE_ID[w]} fam-${fam}${w.length > 10 || tight ? ' long' : ''}${tight ? ' tight' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:var(--v-${f.q});--k:${Math.round(45 + f.d * 5.5)}%"><svg class="shape-line" viewBox="0 0 92 92" aria-hidden="true"><use href="#shp-${SHAPE_ID[w]}"/></svg><span class="fw-t">${esc(w)}</span>${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
     }));
     inner = `<div class="zones" role="group" aria-label="Jump to an area">${[['hu', '↖'], ['hp', '↗'], ['lu', '↙'], ['lp', '↘']].map(([q, arr]) => `<button class="zone-btn" data-act="ck-zone" data-q="${q}" style="--c:${QCOL[q]}"><span aria-hidden="true">${arr}</span> ${QUADS[q].short}<span class="sr">: ${QUADS[q].name.toLowerCase()}</span></button>`).join('')}</div>
       <div class="field-wrap" id="ck-field" tabindex="-1"><div class="field" role="group" aria-label="Feeling words. Up is more energy, right is more pleasant.">${cells}</div></div>
@@ -450,7 +524,7 @@ function pickCard() {
   const f = ck.feelings[i];
   const others = ck.feelings.length > 1 ? `<div class="chips picked-chips" role="group" aria-label="Your picks">${ck.feelings.map((x, k) => `<button class="chip small" data-act="ck-focus" data-w="${esc(x.w)}" aria-pressed="${k === i}"><i class="cdot" style="background:${QCOL[x.q]}" aria-hidden="true"></i>${esc(x.w)}</button>`).join('')}</div>` : '';
   return `<div class="pick-card" id="ck-picked" style="--c:${QCOL[f.q]}">
-    <div class="row between nowrap"><div><span class="pw">${esc(f.w)}</span>${arSpan(f)}${arOf(f) && f.tr ? `<div class="tr">${esc(f.tr)}</div>` : ''}</div>
+    <div class="row between nowrap"><div class="row nowrap">${shapeIcon(f.w, `color-mix(in srgb, var(--v-${f.q}) 80%, var(--v-base))`)}<div><span class="pw">${esc(f.w)}</span>${arSpan(f)}${arOf(f) && f.tr ? `<div class="tr">${esc(f.tr)}</div>` : ''}</div></div>
       <div class="row nowrap">${arOf(f) ? `<button class="say" data-act="say" data-i="${i}" aria-label="Hear it in Arabic">▸</button>` : ''}<button class="btn quiet" data-act="ck-unpick" data-i="${i}" aria-label="Remove ${esc(f.w)}">Remove</button></div></div>
     <p class="def">${esc(defOf(f.w))}</p>
     <label class="sr" for="int${i}">How strong is ${esc(f.w)}?</label>
@@ -1075,7 +1149,7 @@ function helpSheet() {
   <h2>How Undertow works</h2>
   <p>Check in whenever something shifts. Pick up to three feelings and how strong each is, then save. Where you feel it and what's going on are optional. After a check-in, your toolkit suggests something to try, and you say whether it helped.</p>
   <h3>Words and wheel</h3>
-  <p>The <b>words</b> are a field of 144 feelings you can drag around in. Up is more energy, right is more pleasant, the mildest feelings sit in the middle and the strongest in the corners. Tap a word to see what it means. The four buttons above jump to each area, and search finds a word by name or by what it means. The word list, definitions and layout are Undertow's own.</p>
+  <p>The <b>words</b> are a field of 144 feelings you can drag around in. Up is more energy, right is more pleasant, the mildest feelings sit in the middle and the strongest in the corners. Each word's shape looks like the feeling: spiky for anger, wobbly for worry, a teardrop for sadness, a burst for excitement, a heart for love, and stronger feelings have bolder shapes. Tap a word to see what it means. The four buttons above jump to each area, and search finds a word by name or by what it means. The word list, definitions and layout are Undertow's own.</p>
   <p>The <b>wheel</b> is drawn from Robert Plutchik's 1980 model of emotion: eight basic emotions, each at three strengths, with blends between neighbours (joy and trust make love). The strongest sit at the center. The drawing and colors here are Undertow's own.</p>
   <h3>Toolkit</h3>
   <p>Keep the skills, affirmations, reminders and notes from therapy in your own words. Tag each with the feelings it helps with (like anxious or lonely), what it helps you do, and how long it takes. <b>Help me choose</b> asks what you're feeling, how strong it is, what you need, how much time you have and who's around, then suggests your own items first, ranked by how often they've helped.</p>

@@ -358,3 +358,23 @@ const PROMPTS = {
   lu: 'What feels heavy? What would be a little kinder to yourself right now?',
   lp: 'What is making this moment calm? How could you get more of it?',
 };
+
+/* Shapes: each word's circle takes a shape that looks like the feeling.
+   Families are drawn in app.js; each word gets its own small variation, and stronger words are more extreme. */
+const SHAPE_FAMILIES = {
+  spiky: ['enraged', 'furious', 'fuming', 'angry', 'disgusted', 'resentful', 'jealous', 'envious', 'humiliated'],
+  jagged: ['irritated', 'annoyed', 'frustrated', 'impatient', 'agitated', 'defensive', 'pressured', 'stressed', 'tense', 'on edge'],
+  shaky: ['anxious', 'nervous', 'jittery', 'worried', 'uneasy', 'apprehensive', 'restless', 'scared', 'frightened', 'panicked', 'terrified', 'alarmed', 'threatened', 'overwhelmed', 'insecure', 'embarrassed'],
+  burst: ['excited', 'thrilled', 'ecstatic', 'elated', 'exhilarated', 'giddy', 'enthusiastic', 'energized', 'triumphant', 'amazed', 'surprised', 'shocked', 'alert'],
+  flower: ['happy', 'glad', 'joyful', 'cheerful', 'delighted', 'playful', 'amused', 'silly', 'upbeat', 'lively'],
+  rising: ['proud', 'confident', 'determined', 'empowered', 'motivated', 'accomplished', 'inspired', 'passionate', 'eager', 'hopeful', 'optimistic', 'focused'],
+  swirl: ['curious', 'interested', 'thoughtful', 'reflective', 'nostalgic', 'fulfilled', 'lost'],
+  heart: ['loved', 'tender', 'compassionate', 'grateful', 'connected', 'appreciated', 'blessed'],
+  round: ['calm', 'serene', 'peaceful', 'centered', 'balanced', 'steady', 'at ease', 'settled', 'secure', 'safe', 'patient', 'content', 'satisfied'],
+  soft: ['relaxed', 'mellow', 'cozy', 'comfortable', 'rested', 'carefree', 'relieved', 'accepted', 'open', 'understood', 'trusting'],
+  flat: ['sleepy', 'tired', 'exhausted', 'drained', 'sluggish', 'burned out', 'unmotivated', 'bored', 'apathetic'],
+  drop: ['sad', 'grieving', 'heartbroken', 'hurt', 'lonely', 'homesick', 'disappointed', 'regretful', 'miserable', 'despairing'],
+  cloud: ['gloomy', 'down', 'depressed', 'hopeless', 'discouraged', 'defeated', 'helpless'],
+  shrunk: ['ashamed', 'guilty', 'inadequate', 'rejected', 'left out', 'isolated', 'withdrawn', 'fragile'],
+  hollow: ['empty', 'numb'],
+};
