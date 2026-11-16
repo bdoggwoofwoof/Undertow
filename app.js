@@ -1,7 +1,7 @@
 /* Undertow 1.2 — personal feelings check-in app. Data stays on this device. */
 (() => {
 'use strict';
-const VERSION = '1.2';
+const VERSION = '1.2.1';
 const VERSION_DATE = 'Nov 15, 2026';
 const KEY = 'undertow.v1';
 const $ = (s, el = document) => el.querySelector(s);
@@ -378,7 +378,26 @@ function placeField(zone, smooth) {
   } else if (ck.fx != null) { x = ck.fx; y = ck.fy; }
   else { x = (el.scrollWidth - el.clientWidth) / 2; y = (el.scrollHeight - el.clientHeight) / 2; }
   el.scrollTo({ left: x, top: y, behavior: smooth ? 'smooth' : 'auto' });
+  focusField();
 }
+/* Like a lens: the words nearest the middle of the field grow, the ones toward the edges shrink back. */
+let focusRaf = 0;
+function focusField() {
+  const el = $('#ck-field'); if (!el) return;
+  const cx = el.scrollLeft + el.clientWidth / 2, cy = el.scrollTop + el.clientHeight / 2;
+  const reach = Math.max(el.clientWidth, el.clientHeight) * 0.62;
+  el.querySelectorAll('.fw').forEach(b => {
+    const dx = b.offsetLeft + b.offsetWidth / 2 - cx, dy = b.offsetTop + b.offsetHeight / 2 - cy;
+    const t = Math.min(1, Math.hypot(dx, dy) / reach);
+    b.style.setProperty('--s', (1.14 - 0.42 * t * t).toFixed(3));
+    b.style.zIndex = t < 0.25 ? 1 : '';
+  });
+}
+document.addEventListener('scroll', ev => {
+  if (ev.target.id !== 'ck-field' || focusRaf) return;
+  focusRaf = requestAnimationFrame(() => { focusRaf = 0; focusField(); });
+}, true);
+addEventListener('resize', () => focusField());
 function isPicked(w) { return ck.feelings.some(f => f.w === w); }
 const arSpan = f => arOf(f) ? `<span class="ar" lang="ar" dir="rtl">${esc(arOf(f))}</span>` : '';
 /* The words you use most, newest breaking ties. */
@@ -397,7 +416,7 @@ function stepFeel() {
     FIELD.forEach(row => row.forEach(w => {
       const f = FMAP[w];
       const a = arOf({ ...f, src: 'grid' });
-      cells += `<button class="fw${w.length > 10 ? ' long' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:${QCOL[f.q]};--k:${Math.round(12 + f.d * 5)}%">${esc(w)}${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
+      cells += `<button class="fw${w.length > 10 ? ' long' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:var(--v-${f.q});--k:${Math.round(45 + f.d * 5.5)}%">${esc(w)}${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
     }));
     inner = `<div class="zones" role="group" aria-label="Jump to an area">${[['hu', '↖'], ['hp', '↗'], ['lu', '↙'], ['lp', '↘']].map(([q, arr]) => `<button class="zone-btn" data-act="ck-zone" data-q="${q}" style="--c:${QCOL[q]}"><span aria-hidden="true">${arr}</span> ${QUADS[q].short}<span class="sr">: ${QUADS[q].name.toLowerCase()}</span></button>`).join('')}</div>
       <div class="field-wrap" id="ck-field" tabindex="-1"><div class="field" role="group" aria-label="Feeling words. Up is more energy, right is more pleasant.">${cells}</div></div>

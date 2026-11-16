@@ -7,6 +7,7 @@
   --hu: #b8651f; --hp: #b58a07; --lu: #44659b; --lp: #2f7f5f;
   --hu-soft: #f6e3d1; --hp-soft: #f5ebc6; --lu-soft: #dfe6f2; --lp-soft: #d9ede3;
   --danger: #9b3b2a;
+  --v-hu: #f2955a; --v-hp: #f4c83c; --v-lu: #84a8e8; --v-lp: #66cf9a; --v-base: #f7f5ef; --v-ink: #13232a;
   --serif: 'Fraunces', Georgia, serif; --sans: 'IBM Plex Sans', system-ui, sans-serif; --ar: 'IBM Plex Sans Arabic', 'Geeza Pro', sans-serif;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
   --r1: 8px; --r2: 14px; --r3: 22px;
@@ -237,7 +238,7 @@ input[type=search] { width: 100%; border: 1px solid var(--edge); border-radius: 
 .zone-btn { min-height: 44px; border-radius: 999px; border: 1.5px solid var(--c); background: color-mix(in srgb, var(--c) calc(16% * var(--tile-k)), var(--surface)); padding: 0 6px; font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; }
 .field-wrap { height: min(46vh, 440px); min-height: 260px; overflow: auto; overscroll-behavior: contain; border-radius: var(--r3); border: 1px solid var(--line); -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
 .field-wrap:focus { outline: none; }
-.field { display: grid; grid-template-columns: repeat(12, 92px); grid-auto-rows: 92px; gap: 10px; padding: 18px; width: max-content;
+.field { position: relative; display: grid; grid-template-columns: repeat(12, 92px); grid-auto-rows: 92px; gap: 10px; padding: 18px; width: max-content;
   background:
     radial-gradient(circle at 0 0, var(--hu-soft), transparent 55%),
     radial-gradient(circle at 100% 0, var(--hp-soft), transparent 55%),
@@ -245,12 +246,13 @@ input[type=search] { width: 100%; border: 1px solid var(--edge); border-radius: 
     radial-gradient(circle at 100% 100%, var(--lp-soft), transparent 55%), var(--surface); }
 .fw { border-radius: 50%; border: 0; padding: 6px; color: var(--ink); font-size: 13.5px; font-weight: 500; line-height: 1.15;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; text-align: center;
-  background: color-mix(in srgb, var(--c) calc(var(--k) * var(--field-k, 1)), var(--surface));
-  box-shadow: 0 1px 3px rgba(10, 30, 35, .10); transition: transform .12s ease, box-shadow .12s ease; touch-action: manipulation; }
+  color: var(--v-ink); background: color-mix(in srgb, var(--c) var(--k), var(--v-base));
+  transform: scale(var(--s, 1)); will-change: transform;
+  box-shadow: 0 2px 6px rgba(10, 30, 35, .16); transition: transform .12s ease-out, box-shadow .12s ease; touch-action: manipulation; }
 .fw.long { font-size: 12.5px; letter-spacing: -0.01em; }
 .fw .ar { font-size: 12px; font-weight: 400; }
-.fw:active { transform: scale(.94); }
-.fw[aria-pressed="true"] { box-shadow: 0 0 0 3px var(--surface), 0 0 0 6px var(--ink); font-weight: 700; transform: scale(1.04); }
+.fw:active { transform: scale(calc(var(--s, 1) * .94)); }
+.fw[aria-pressed="true"] { box-shadow: 0 0 0 3px var(--bg), 0 0 0 6px var(--ink); font-weight: 700; }
 .fw[aria-pressed="true"]::after { content: '✓'; font-size: 12px; line-height: 1; }
 .field-hint { margin: var(--s2) 0 0; }
 .results { margin-bottom: var(--s3); }
