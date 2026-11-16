@@ -1,7 +1,7 @@
 /* Undertow 1.2 — personal feelings check-in app. Data stays on this device. */
 (() => {
 'use strict';
-const VERSION = '1.3';
+const VERSION = '1.4';
 const VERSION_DATE = 'Nov 15, 2026';
 const KEY = 'undertow.v1';
 const $ = (s, el = document) => el.querySelector(s);
@@ -161,7 +161,35 @@ const SHAPE_FAMILY = {};
 Object.entries(SHAPE_FAMILIES).forEach(([f, ws]) => ws.forEach(w => { SHAPE_FAMILY[w] = f; }));
 const SHAPE_ID = {};
 function seeded(word) { let h = 2166136261; for (const ch of word) h = Math.imul(h ^ ch.charCodeAt(0), 16777619); return () => ((h = Math.imul(h ^ (h >>> 15), 2246822507) ^ Math.imul(h ^ (h >>> 13), 3266489909)) >>> 0) / 4294967296; }
+/* Hand-designed shapes, done in batches of six. Clean: no random wobble, many points so edges are crisp.
+   Each returns points around (0,0); y grows downward, so -PI/2 is straight up. */
+const UP = -Math.PI / 2, TAU = Math.PI * 2;
+const tooth = (t, n, at = UP) => { const u = ((((t - at) * n / TAU) % 1) + 1.5) % 1; return 1 - Math.abs(2 * u - 1); }; // 1 at each point, 0 between
+const polar = (fn, N = 360) => Array.from({ length: N }, (_, i) => { const t = i / N * TAU, r = fn(t); return [Math.cos(t) * r, Math.sin(t) * r]; });
+const CUSTOM_SHAPE = {
+  // an explosion: twelve even, sharp points
+  enraged: () => polar(t => 1 + 0.4 * Math.pow(tooth(t, 12), 1.5)),
+  // a flame: a round body with three tongues of fire rising from the top
+  furious: () => polar(t => {
+    const fromUp = Math.atan2(Math.sin(t - UP), Math.cos(t - UP));
+    // three tongues, blended smoothly where they meet, each leaning a little outward
+    const tongue = (c, h, w) => h * Math.exp(-Math.pow(Math.abs(fromUp - c) / w, 1.15));
+    const k = 14, parts = [tongue(0, 0.8, 0.24), tongue(-0.55, 0.5, 0.22), tongue(0.55, 0.5, 0.22), 0];
+    return 1 + Math.log(parts.reduce((s, v) => s + Math.exp(k * v), 0) / 1) / k - Math.log(4) / k * 0.6;
+  }),
+  // trembling: a fine, even edge of small teeth all the way round
+  terrified: () => polar(t => 1 + 0.11 * tooth(t, 28)),
+  // spinning: a pinwheel whose blades sweep one way
+  panicked: () => polar(t => { const u = ((((t - UP) * 7 / TAU) % 1) + 1) % 1; return 1 + 0.36 * Math.pow(u, 1.8); }),
+  // an alarm signal: eight points, long and short in turn, like a compass
+  alarmed: () => polar(t => { const n = Math.round(((t - UP) / (TAU / 8)) + 64) % 2; return 1 + (n ? 0.3 : 0.52) * Math.pow(tooth(t, 8), 1.8); }),
+  // hair standing on end: sharp points across the top, a smooth round bottom
+  shocked: () => polar(t => { const up = Math.max(0, -Math.sin(t)); return 1 + 0.5 * Math.pow(tooth(t, 15), 1.5) * Math.pow(up, 1.4); }),
+};
+/* Words whose text sits lower in their shape. */
+const SHAPE_PAD_TOP = { furious: 1, shocked: 1 };
 function shapePoints(word, d) {
+  if (CUSTOM_SHAPE[word]) return fitPoints(CUSTOM_SHAPE[word](), 1);
   const fam = SHAPE_FAMILY[word] || 'soft', rnd = seeded(word), k = 0.7 + 0.03 * (d || 0);
   const N = 96, pts = [], TAU = Math.PI * 2;
   const rot = rnd() * TAU;
@@ -201,10 +229,13 @@ function shapePoints(word, d) {
     }
     pts.push([x, y]);
   }
-  // fit the 92-pixel box with a 1-pixel margin; small shapes keep their smallness
+  return fitPoints(pts, fam === 'shrunk' ? 0.82 : 1);
+}
+/* Fit the 92-pixel box with a 1-pixel margin; small shapes keep their smallness. */
+function fitPoints(pts, scale) {
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   pts.forEach(([x, y]) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); });
-  const fit = 90 / Math.max(x1 - x0, y1 - y0) * (fam === 'shrunk' ? 0.82 : 1);
+  const fit = 90 / Math.max(x1 - x0, y1 - y0) * scale;
   const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
   return pts.map(([x, y]) => [46 + (x - cx) * fit, 46 + (y - cy) * fit]);
 }
@@ -489,8 +520,8 @@ function stepFeel() {
     FIELD.forEach(row => row.forEach(w => {
       const f = FMAP[w];
       const a = arOf({ ...f, src: 'grid' });
-      const fam = SHAPE_FAMILY[w], tight = ['drop', 'heart'].includes(fam) && w.length > 8;
-      cells += `<button class="fw shp-${SHAPE_ID[w]} fam-${fam}${w.length > 10 || tight ? ' long' : ''}${tight ? ' tight' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:var(--v-${f.q});--k:${Math.round(45 + f.d * 5.5)}%"><svg class="shape-line" viewBox="0 0 92 92" aria-hidden="true"><use href="#shp-${SHAPE_ID[w]}"/></svg><span class="fw-t">${esc(w)}</span>${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
+      const fam = SHAPE_FAMILY[w], padTop = SHAPE_PAD_TOP[w] ? ' pad-top' : '', tight = ['drop', 'heart'].includes(fam) && w.length > 8;
+      cells += `<button class="fw shp-${SHAPE_ID[w]} fam-${fam}${padTop}${w.length > 10 || tight ? ' long' : ''}${tight ? ' tight' : ''}" data-act="ck-fword" data-w="${esc(w)}" aria-pressed="${isPicked(w)}" style="--c:var(--v-${f.q});--k:${Math.round(45 + f.d * 5.5)}%"><svg class="shape-line" viewBox="0 0 92 92" aria-hidden="true"><use href="#shp-${SHAPE_ID[w]}"/></svg><span class="fw-t">${esc(w)}</span>${a ? `<span class="ar" lang="ar" dir="rtl">${esc(a)}</span>` : ''}</button>`;
     }));
     inner = `<div class="zones" role="group" aria-label="Jump to an area">${[['hu', '↖'], ['hp', '↗'], ['lu', '↙'], ['lp', '↘']].map(([q, arr]) => `<button class="zone-btn" data-act="ck-zone" data-q="${q}" style="--c:${QCOL[q]}"><span aria-hidden="true">${arr}</span> ${QUADS[q].short}<span class="sr">: ${QUADS[q].name.toLowerCase()}</span></button>`).join('')}</div>
       <div class="field-wrap" id="ck-field" tabindex="-1"><div class="field" role="group" aria-label="Feeling words. Up is more energy, right is more pleasant.">${cells}</div></div>

@@ -258,7 +258,7 @@ input[type=search] { width: 100%; border: 1px solid var(--edge); border-radius: 
 .fw > span { position: relative; }
 .shape-line { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .shape-line use { fill: none; stroke: rgba(10, 30, 35, .22); stroke-width: 2.5; }
-.fw[aria-pressed="true"] .shape-line use { stroke: var(--v-ink); stroke-width: 9; }
+.fw[aria-pressed="true"] .shape-line use { stroke: var(--v-ink); stroke-width: 7; }
 .fw:focus-visible { outline: none; }
 .fw:focus-visible .shape-line use { stroke: var(--accent); stroke-width: 10; }
 :root[data-theme="dark"] .fw:focus-visible .shape-line use { stroke: #0e5866; }
@@ -316,3 +316,4 @@ details.more summary { cursor: pointer; color: var(--accent); font-weight: 600; 
 .fw.fam-hollow { background: color-mix(in srgb, var(--c) 22%, var(--v-base)); }
 .fw.fam-hollow .shape-line use { stroke: color-mix(in srgb, var(--c) 80%, var(--v-ink)); stroke-width: 5; stroke-dasharray: 7 6; }
 .fw.fam-hollow[aria-pressed="true"] .shape-line use { stroke: var(--v-ink); stroke-dasharray: none; stroke-width: 9; }
+.fw.pad-top { padding-top: 22px; }
